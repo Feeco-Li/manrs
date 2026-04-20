@@ -11,7 +11,6 @@ use cursive::views::{
     Dialog, EditView, LinearLayout, OnEventView, PaddedView, Panel, SelectView, TextView,
 };
 use cursive::{event, theme, utils::markup};
-use cursive_markup::MarkupView;
 
 use crate::args;
 use crate::doc;
@@ -19,7 +18,7 @@ use crate::index;
 use crate::source;
 use crate::viewer::{self, utils, utils::ManRenderer as _};
 
-use views::{CodeView, HtmlRenderer, LinkView};
+use views::{CodeView, LinkView};
 
 #[derive(Clone, Debug)]
 pub struct TuiViewer {}
@@ -186,14 +185,14 @@ impl<'s> utils::ManRenderer for TuiManRenderer<'s> {
     }
 
     fn print_text(&mut self, indent: u8, text: &doc::Text) -> Result<(), Self::Error> {
-        let indent = usize::from(indent);
-        let renderer = HtmlRenderer::new(&text.html, self.highlighter.cloned());
-        let mut view = MarkupView::with_renderer(renderer);
-        view.set_maximum_width(self.max_width.saturating_sub(indent));
-        let doc_name = self.doc_name.clone();
-        let doc_ty = self.doc_ty;
-        view.on_link_select(move |s, link| handle_link(s, &doc_name, doc_ty, link));
-        self.layout.add_child(indent_view(indent, view));
+        let indent_usize = usize::from(indent);
+        // Render HTML to plain text using html2text
+        let width = self.max_width.saturating_sub(indent_usize);
+        let plain = html2text::config::plain()
+            .string_from_read(text.html.as_bytes(), width)
+            .unwrap_or_else(|_| text.plain.clone());
+        let text_view = TextView::new(plain);
+        self.layout.add_child(indent_view(indent, text_view));
         Ok(())
     }
 
@@ -208,10 +207,7 @@ fn indent_view<V>(indent: impl Into<usize>, view: V) -> PaddedView<V> {
 }
 
 fn create_backend() -> anyhow::Result<Box<dyn cursive::backend::Backend>> {
-    let termion =
-        cursive::backends::termion::Backend::init().context("Could not create termion backend")?;
-    let buffered = cursive_buffered_backend::BufferedBackend::new(termion);
-    Ok(Box::new(buffered))
+    cursive::backends::termion::Backend::init().context("Could not create termion backend")
 }
 
 fn create_cursive(
@@ -347,13 +343,6 @@ fn open_doc(s: &mut cursive::Cursive, doc: &doc::Doc) {
     s.add_fullscreen_layer(view);
 }
 
-fn handle_link(s: &mut cursive::Cursive, doc_name: &doc::Fqn, doc_ty: doc::ItemType, link: &str) {
-    let result = resolve_link(doc_name, doc_ty, link).and_then(|link| open_link(s, link));
-    if let Err(err) = result {
-        report_error(s, err);
-    }
-}
-
 fn open_link(s: &mut cursive::Cursive, link: ResolvedLink) -> anyhow::Result<()> {
     match link {
         ResolvedLink::Doc(ty, name) => {
@@ -378,112 +367,5 @@ enum ResolvedLink {
 impl From<utils::DocLink> for ResolvedLink {
     fn from(link: utils::DocLink) -> ResolvedLink {
         ResolvedLink::Doc(link.ty, link.name)
-    }
-}
-
-fn resolve_link(
-    doc_name: &doc::Fqn,
-    doc_ty: doc::ItemType,
-    link: &str,
-) -> anyhow::Result<ResolvedLink> {
-    // TODO: support docs.rs and doc.rust-lang.org links
-    match url::Url::parse(link) {
-        Ok(_) => Ok(ResolvedLink::External(link.to_owned())),
-        Err(url::ParseError::RelativeUrlWithoutBase) => resolve_doc_link(doc_name, doc_ty, link)
-            .with_context(|| format!("Could not parse relative link URL: {}", link)),
-        Err(e) => Err(anyhow::Error::new(e).context(format!("Could not parse link URL: {}", link))),
-    }
-}
-
-fn resolve_doc_link(
-    doc_name: &doc::Fqn,
-    doc_ty: doc::ItemType,
-    link: &str,
-) -> anyhow::Result<ResolvedLink> {
-    // TODO: use a proper URL parser instead of manually parsing the URL
-    let (link, fragment) = {
-        let parts: Vec<_> = link.splitn(2, '#').collect();
-        if parts.len() > 1 {
-            (parts[0], Some(parts[1]))
-        } else {
-            (parts[0], None)
-        }
-    };
-    let parts: Vec<_> = link
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .filter(|s| *s != ".")
-        .collect();
-
-    let (mut ty, mut name) = if doc_ty != doc::ItemType::Module && !parts.is_empty() {
-        (None, doc_name.parent())
-    } else {
-        (Some(doc_ty), Some(doc_name.to_owned()))
-    };
-
-    for part in parts {
-        // We support "..", "index.html", "<module>" and "<type>.<name>.html".
-        match part {
-            ".." => {
-                ty = None;
-                name = name.context("Exceeded root level")?.parent();
-            }
-            "index.html" => {}
-            _ => {
-                if let Some((part_ty, part_name)) = parse_url_part(part, Some(".html")) {
-                    // part == "type.name.html"
-                    ty = Some(part_ty.parse()?);
-                    name = if let Some(name) = name {
-                        Some(name.child(part_name))
-                    } else {
-                        Some(part_name.to_owned().into())
-                    };
-                } else {
-                    // part == "<module>"
-                    ty = Some(doc::ItemType::Module);
-                    name = if let Some(name) = name {
-                        Some(name.child(part))
-                    } else {
-                        Some(part.to_owned().into())
-                    };
-                }
-            }
-        }
-    }
-
-    if let Some(fragment) = fragment {
-        // If the fragment is "<type>.:name>", we add it to the name, otherwise we ignore it
-        // because it just points to some other element on the page.
-        if let Some((fragment_ty, fragment_name)) = parse_url_part(fragment, None) {
-            ty = Some(fragment_ty.parse()?);
-            name = if let Some(name) = name {
-                Some(name.child(fragment_name))
-            } else {
-                Some(fragment_name.to_owned().into())
-            };
-        }
-    }
-
-    Ok(ResolvedLink::Doc(
-        ty,
-        name.context("Cannot handle link to root")?,
-    ))
-}
-
-fn parse_url_part<'s>(s: &'s str, suffix: Option<&str>) -> Option<(&'s str, &'s str)> {
-    let s = if let Some(suffix) = suffix {
-        if s.ends_with(suffix) {
-            &s[..s.len() - suffix.len()]
-        } else {
-            return None;
-        }
-    } else {
-        s
-    };
-    let parts: Vec<_> = s.split('.').collect();
-    if parts.len() == 2 {
-        Some((parts[0], parts[1]))
-    } else {
-        None
     }
 }

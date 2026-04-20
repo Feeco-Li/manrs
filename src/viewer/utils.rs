@@ -69,9 +69,9 @@ impl<'s, 'ss, 't, I: Iterator<Item = &'s str>> Iterator for HighlightedLines<'s,
     type Item = Vec<(syntect::highlighting::Style, &'s str)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|s| self.highlighter.highlight(s, self.syntax_set))
+        self.iter.next().map(|s| {
+            self.highlighter.highlight(s, self.syntax_set)
+        })
     }
 }
 
@@ -319,7 +319,6 @@ pub struct RichDecorator {
     link_filter: fn(&str) -> bool,
     link_mode: LinkMode,
     ignore_next_link: bool,
-    links: Vec<String>,
 }
 
 impl RichDecorator {
@@ -328,7 +327,6 @@ impl RichDecorator {
             link_filter,
             link_mode,
             ignore_next_link: false,
-            links: Vec::new(),
         }
     }
 }
@@ -344,10 +342,7 @@ impl text_renderer::TextDecorator for RichDecorator {
             let annotation = text_renderer::RichAnnotation::Link(url.to_owned());
             match self.link_mode {
                 LinkMode::Annotate => (String::new(), annotation),
-                LinkMode::List => {
-                    self.links.push(url.to_owned());
-                    ("[".to_owned(), annotation)
-                }
+                LinkMode::List => ("[".to_owned(), annotation),
             }
         }
     }
@@ -358,59 +353,78 @@ impl text_renderer::TextDecorator for RichDecorator {
         } else {
             match self.link_mode {
                 LinkMode::Annotate => String::new(),
-                LinkMode::List => format!("][{}]", self.links.len() - 1),
+                LinkMode::List => "]".to_owned(),
             }
         }
     }
 
-    fn decorate_em_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_em_start(&self) -> (String, Self::Annotation) {
         ("".to_string(), text_renderer::RichAnnotation::Emphasis)
     }
 
-    fn decorate_em_end(&mut self) -> String {
+    fn decorate_em_end(&self) -> String {
         "".to_string()
     }
 
-    fn decorate_strong_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_strong_start(&self) -> (String, Self::Annotation) {
         ("".to_string(), text_renderer::RichAnnotation::Strong)
     }
 
-    fn decorate_strong_end(&mut self) -> String {
+    fn decorate_strong_end(&self) -> String {
         "".to_string()
     }
 
-    fn decorate_strikeout_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_strikeout_start(&self) -> (String, Self::Annotation) {
         ("".to_string(), text_renderer::RichAnnotation::Strikeout)
     }
 
-    fn decorate_strikeout_end(&mut self) -> String {
+    fn decorate_strikeout_end(&self) -> String {
         "".to_string()
     }
 
-    fn decorate_code_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_code_start(&self) -> (String, Self::Annotation) {
         ("".to_string(), text_renderer::RichAnnotation::Code)
     }
 
-    fn decorate_code_end(&mut self) -> String {
+    fn decorate_code_end(&self) -> String {
         "".to_string()
     }
 
-    fn decorate_preformat_first(&mut self) -> Self::Annotation {
+    fn decorate_preformat_first(&self) -> Self::Annotation {
         text_renderer::RichAnnotation::Preformat(false)
     }
 
-    fn decorate_preformat_cont(&mut self) -> Self::Annotation {
+    fn decorate_preformat_cont(&self) -> Self::Annotation {
         text_renderer::RichAnnotation::Preformat(true)
     }
 
-    fn decorate_image(&mut self, title: &str) -> (String, Self::Annotation) {
-        (title.to_string(), text_renderer::RichAnnotation::Image)
+    fn decorate_image(&mut self, _src: &str, title: &str) -> (String, Self::Annotation) {
+        (
+            title.to_string(),
+            text_renderer::RichAnnotation::Image(title.to_owned()),
+        )
     }
 
-    fn finalise(self) -> Vec<text_renderer::TaggedLine<text_renderer::RichAnnotation>> {
+    fn header_prefix(&self, level: usize) -> String {
+        "#".repeat(level) + " "
+    }
+
+    fn quote_prefix(&self) -> String {
+        "> ".to_string()
+    }
+
+    fn unordered_item_prefix(&self) -> String {
+        "* ".to_string()
+    }
+
+    fn ordered_item_prefix(&self, i: i64) -> String {
+        format!("{}. ", i)
+    }
+
+    fn finalise(&mut self, links: Vec<String>) -> Vec<text_renderer::TaggedLine<Self::Annotation>> {
         let mut lines = Vec::new();
         if self.link_mode == LinkMode::List {
-            for (idx, link) in self.links.into_iter().enumerate() {
+            for (idx, link) in links.into_iter().enumerate() {
                 let mut line = text_renderer::TaggedLine::new();
                 line.push_str(text_renderer::TaggedString {
                     s: format!("[{}] ", idx),

@@ -16,42 +16,40 @@ license = "MIT"
 exclude = [".builds/*", "tests/html/*", "tests/snapshots/*"]
 
 [dependencies]
-anyhow = "1.0.31"
-cursive_buffered_backend = "0.5"
-cursive-markup = "0.2"
-html2text = "0.2.1"
-kuchiki = "0.8.0"
-log = "0.4.11"
-markup5ever = "0.10.0"
+anyhow = "1.0"
+html2text = "0.12"
+scraper = "0.26"
+ego-tree = "0.11"
+log = "0.4"
 merge = "0.1.0"
-pager = "0.16.0"
-serde_json = "1.0.56"
+pager = "0.16"
+serde_json = "1.0"
 serde_tuple = "0.5.0"
 termion = "1.5"
-toml = "0.5.6"
-url = "2.1.1"
-webbrowser = "0.5.5"
-xdg = "2.2.0"
+toml = "0.8"
+url = "2"
+webbrowser = "1"
+xdg = "3"
 
 [dependencies.cursive]
-version = "0.16"
+version = "0.21"
 default-features = false
 features = ["termion-backend"]
 
 [dependencies.env_logger]
-version = "0.8.0"
+version = "0.11"
 default-features = false
 
 [dependencies.serde]
-version = "1.0.114"
+version = "1.0"
 features = ["derive"]
 
-[dependencies.structopt]
-version = "0.3.15"
-default-features = false
+[dependencies.clap]
+version = "4"
+features = ["derive"]
 
 [dependencies.syntect]
-version = "4.3.0"
+version = "4"
 default-features = false
 features = ["parsing", "regex-onig", "assets", "dump-load"]
 

@@ -16,7 +16,6 @@ pub struct PlainTextRenderer {
 
 #[derive(Clone, Debug, Default)]
 struct Decorator {
-    links: Vec<String>,
     ignore_next_link: bool,
 }
 
@@ -38,12 +37,16 @@ impl utils::ManRenderer for PlainTextRenderer {
     }
 
     fn print_text(&mut self, indent: u8, s: &doc::Text) -> io::Result<()> {
-        let lines = html2text::from_read_with_decorator(
-            s.html.as_bytes(),
-            self.line_length - usize::from(indent),
-            Decorator::new(),
-        );
-        for line in lines.trim().split('\n') {
+        let width = self.line_length.saturating_sub(usize::from(indent));
+        let lines = html2text::config::with_decorator(Decorator::new())
+            .lines_from_read(s.html.as_bytes(), width)
+            .unwrap_or_default();
+        let text: String = lines
+            .into_iter()
+            .map(|l| l.into_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for line in text.trim().split('\n') {
             writeln!(io::stdout(), "{}{}", " ".repeat(indent.into()), line)?;
         }
         Ok(())
@@ -82,7 +85,6 @@ impl text_renderer::TextDecorator for Decorator {
     fn decorate_link_start(&mut self, url: &str) -> (String, Self::Annotation) {
         if super::list_link(url) {
             self.ignore_next_link = false;
-            self.links.push(url.to_string());
             ("[".to_owned(), ())
         } else {
             self.ignore_next_link = true;
@@ -94,57 +96,67 @@ impl text_renderer::TextDecorator for Decorator {
         if self.ignore_next_link {
             String::new()
         } else {
-            format!("][{}]", self.links.len())
+            "]".to_owned()
         }
     }
 
-    fn decorate_em_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_em_start(&self) -> (String, Self::Annotation) {
         ("*".to_owned(), ())
     }
 
-    fn decorate_em_end(&mut self) -> String {
+    fn decorate_em_end(&self) -> String {
         "*".to_owned()
     }
 
-    fn decorate_strong_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_strong_start(&self) -> (String, Self::Annotation) {
         ("**".to_owned(), ())
     }
 
-    fn decorate_strong_end(&mut self) -> String {
+    fn decorate_strong_end(&self) -> String {
         "**".to_owned()
     }
 
-    fn decorate_strikeout_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_strikeout_start(&self) -> (String, Self::Annotation) {
         ("~".to_owned(), ())
     }
 
-    fn decorate_strikeout_end(&mut self) -> String {
+    fn decorate_strikeout_end(&self) -> String {
         "~".to_owned()
     }
 
-    fn decorate_code_start(&mut self) -> (String, Self::Annotation) {
+    fn decorate_code_start(&self) -> (String, Self::Annotation) {
         ("`".to_owned(), ())
     }
 
-    fn decorate_code_end(&mut self) -> String {
+    fn decorate_code_end(&self) -> String {
         "`".to_owned()
     }
 
-    fn decorate_preformat_first(&mut self) -> Self::Annotation {}
-    fn decorate_preformat_cont(&mut self) -> Self::Annotation {}
+    fn decorate_preformat_first(&self) -> Self::Annotation {}
+    fn decorate_preformat_cont(&self) -> Self::Annotation {}
 
-    fn decorate_image(&mut self, title: &str) -> (String, Self::Annotation) {
+    fn decorate_image(&mut self, _src: &str, title: &str) -> (String, Self::Annotation) {
         (format!("[{}]", title), ())
     }
 
-    fn finalise(self) -> Vec<text_renderer::TaggedLine<()>> {
-        self.links
-            .into_iter()
-            .enumerate()
-            .map(|(idx, s)| {
-                text_renderer::TaggedLine::from_string(format!("[{}] {}", idx + 1, s), &())
-            })
-            .collect()
+    fn header_prefix(&self, level: usize) -> String {
+        "#".repeat(level) + " "
+    }
+
+    fn quote_prefix(&self) -> String {
+        "> ".to_string()
+    }
+
+    fn unordered_item_prefix(&self) -> String {
+        "* ".to_string()
+    }
+
+    fn ordered_item_prefix(&self, i: i64) -> String {
+        format!("{}. ", i)
+    }
+
+    fn finalise(&mut self, _links: Vec<String>) -> Vec<text_renderer::TaggedLine<()>> {
+        Vec::new()
     }
 
     fn make_subblock_decorator(&self) -> Self {

@@ -41,9 +41,9 @@ impl utils::ManRenderer for RichTextRenderer {
             indent
         };
         let decorator = utils::RichDecorator::new(super::list_link, utils::LinkMode::List);
-        let lines = html2text::parse(s.html.as_bytes())
-            .render(self.line_length - indent, decorator)
-            .into_lines();
+        let lines = html2text::config::with_decorator(decorator)
+            .lines_from_read(s.html.as_bytes(), self.line_length - indent)
+            .unwrap_or_default();
         for line in utils::highlight_html(&lines, self.highlighter.as_ref()) {
             write!(io::stdout(), "{}", " ".repeat(indent))?;
             render_iter(line.into_iter().map(|s| match s {
@@ -101,12 +101,13 @@ fn style_rich_string(ts: &utils::RichString) -> text_style::StyledStr<'_> {
         match annotation {
             RichAnnotation::Default => {}
             RichAnnotation::Link(_) => s.style_mut().set_underline(true),
-            RichAnnotation::Image => {}
+            RichAnnotation::Image(_) => {}
             RichAnnotation::Emphasis => s.style_mut().set_italic(true),
             RichAnnotation::Strikeout => {}
             RichAnnotation::Strong => s.style_mut().set_bold(true),
             RichAnnotation::Code => s.style_mut().set_fg(text_style::AnsiColor::Yellow.dark()),
             RichAnnotation::Preformat(_) => {}
+            _ => {}
         }
     }
 

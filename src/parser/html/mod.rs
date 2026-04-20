@@ -16,45 +16,36 @@ mod util;
 use std::path;
 
 use anyhow::Context;
-use markup5ever::local_name;
+use ego_tree::NodeRef;
+use scraper::{ElementRef, Html, Node, Selector};
 
 use crate::doc;
 
 use util::NodeRefExt;
 
 pub struct Parser {
-    document: kuchiki::NodeRef,
+    document: Html,
 }
 
 impl Parser {
     pub fn from_file(path: impl AsRef<path::Path>) -> anyhow::Result<Parser> {
-        use kuchiki::traits::TendrilSink;
-
         log::info!("Reading HTML from file '{}'", path.as_ref().display());
-        let document = kuchiki::parse_html()
-            .from_utf8()
-            .from_file(path)
-            .context("Could not read HTML file")?;
+        let s = std::fs::read_to_string(path).context("Could not read HTML file")?;
+        let document = Html::parse_document(&s);
         log::info!("HTML file parsed successfully");
-
         Ok(Parser { document })
     }
 
     pub fn from_string(s: impl Into<String>) -> anyhow::Result<Parser> {
-        use kuchiki::traits::TendrilSink;
-
         log::info!("Reading HTML from string");
-        let document = kuchiki::parse_html()
-            .from_utf8()
-            .read_from(&mut s.into().as_bytes())
-            .context("Could not read HTML string")?;
+        let document = Html::parse_document(&s.into());
         log::info!("HTML string parsed successfully");
-
         Ok(Parser { document })
     }
 
     pub fn find_item(&self, item: &str) -> anyhow::Result<Option<String>> {
         let item = select(&self.document, "ul.docblock li a")?
+            .into_iter()
             .find(|e| e.text_contents() == item)
             .and_then(|e| e.get_attribute("href"));
         Ok(item)
@@ -92,8 +83,8 @@ impl Parser {
         }
 
         let mut doc = doc::Doc::new(name.clone(), ty);
-        doc.description = description.map(From::from);
-        doc.definition = definition.map(From::from);
+        doc.description = description.map(|e| element_ref_to_text(&e));
+        doc.definition = definition.map(|e| element_ref_to_code(&e));
 
         let members = vec![
             get_variants(&self.document, name)?,
@@ -117,9 +108,9 @@ impl Parser {
             .with_context(|| format!("Could not find member {}", name))?;
 
         // Since Rust 1.54.0, the <code> element is replaced with a <h4 class="code-header">
-        let code = if let Some(code) = select_first(heading.as_node(), "code")? {
+        let code = if let Some(code) = select_first_in_element(&heading, "code")? {
             Ok(code)
-        } else if let Some(code) = select_first(heading.as_node(), "h4.code-header")? {
+        } else if let Some(code) = select_first_in_element(&heading, "h4.code-header")? {
             Ok(code)
         } else {
             Err(anyhow::anyhow!(
@@ -129,16 +120,15 @@ impl Parser {
         }?;
 
         // Since Rust 1.54.0, there is an additional summary element around the definition
-        let docblock = heading.as_node().next_sibling().or_else(|| {
-            heading
-                .as_node()
-                .parent()
-                .and_then(|parent| parent.next_sibling())
-        });
+        // ElementRef derefs to NodeRef so we can call next_sibling_element directly
+        let mut docblock = (*heading).next_sibling_element();
+        if docblock.is_none() {
+            docblock = (*heading).parent().and_then(|p| p.next_sibling_element());
+        }
 
         let mut doc = doc::Doc::new(name.clone(), ty);
-        doc.definition = Some(code.into());
-        doc.description = docblock.map(From::from);
+        doc.definition = Some(element_ref_to_code(&code));
+        doc.description = docblock.and_then(|n| ElementRef::wrap(n)).map(|e| element_ref_to_text(&e));
         Ok(doc)
     }
 
@@ -147,7 +137,7 @@ impl Parser {
         let description = select_first(&self.document, ".docblock")?;
 
         let mut doc = doc::Doc::new(name.clone(), doc::ItemType::Module);
-        doc.description = description.map(From::from);
+        doc.description = description.map(|e| element_ref_to_text(&e));
         for item_type in MODULE_MEMBER_TYPES {
             let mut group = doc::MemberGroup::new(None);
             group.members = get_members(&self.document, name, *item_type)?;
@@ -160,67 +150,41 @@ impl Parser {
 
     pub fn find_examples(&self) -> anyhow::Result<Vec<doc::Example>> {
         let examples = select(&self.document, ".rust-example-rendered")?;
-        Ok(examples.map(|n| get_example(n.as_node())).collect())
+        Ok(examples
+            .into_iter()
+            .map(|e| get_example(&e))
+            .collect())
     }
 }
 
-impl From<kuchiki::NodeRef> for doc::Text {
-    fn from(node: kuchiki::NodeRef) -> doc::Text {
-        doc::Text::from(&node)
+fn element_ref_to_text(e: &ElementRef<'_>) -> doc::Text {
+    doc::Text {
+        plain: element_ref_to_plain(e),
+        html: e.html(),
     }
 }
 
-impl From<&kuchiki::NodeRef> for doc::Text {
-    fn from(node: &kuchiki::NodeRef) -> doc::Text {
-        doc::Text {
-            plain: node_to_text(node),
-            html: node.to_string(),
-        }
-    }
+fn element_ref_to_code(e: &ElementRef<'_>) -> doc::Code {
+    doc::Code::new(element_ref_to_plain(e))
 }
 
-impl<T> From<kuchiki::NodeDataRef<T>> for doc::Text {
-    fn from(node: kuchiki::NodeDataRef<T>) -> doc::Text {
-        node.as_node().into()
-    }
-}
-
-impl From<kuchiki::NodeRef> for doc::Code {
-    fn from(node: kuchiki::NodeRef) -> doc::Code {
-        doc::Code::from(&node)
-    }
-}
-
-impl From<&kuchiki::NodeRef> for doc::Code {
-    fn from(node: &kuchiki::NodeRef) -> doc::Code {
-        doc::Code::new(node_to_text(node))
-    }
-}
-
-impl<T> From<kuchiki::NodeDataRef<T>> for doc::Code {
-    fn from(node: kuchiki::NodeDataRef<T>) -> doc::Code {
-        node.as_node().into()
-    }
-}
-
-fn node_to_text(node: &kuchiki::NodeRef) -> String {
+fn element_ref_to_plain(e: &ElementRef<'_>) -> String {
     let mut s = String::new();
-    push_node_to_text(&mut s, node);
+    push_element_to_text(&mut s, e);
     s.trim().to_string()
 }
 
-fn push_node_to_text(s: &mut String, node: &kuchiki::NodeRef) {
-    if node.has_class("notable-traits") {
-        // The notable-traits element lists informations about types in a code block.  But we only
-        // want to extract the code, so we skip this element.
+fn push_element_to_text(s: &mut String, e: &ElementRef<'_>) {
+    if e.has_class("notable-traits") {
         return;
     }
 
-    let is_docblock = node.has_class("docblock");
+    let is_docblock = e.has_class("docblock");
+    let tag = e.value().name();
 
-    let add_newline = if node.is_element(&local_name!("br")) {
+    let add_newline = if tag == "br" {
         true
-    } else if node.has_class("fmt-newline") || is_docblock {
+    } else if e.has_class("fmt-newline") || is_docblock {
         !s.is_empty() && !s.ends_with('\n')
     } else {
         false
@@ -229,12 +193,8 @@ fn push_node_to_text(s: &mut String, node: &kuchiki::NodeRef) {
         s.push('\n');
     }
 
-    if let Some(text) = node.as_text() {
-        s.push_str(&text.borrow())
-    }
-
-    for child in node.children() {
-        push_node_to_text(s, &child);
+    for child in e.children() {
+        push_node_to_text(s, child);
     }
 
     if is_docblock && !s.is_empty() && !s.ends_with('\n') {
@@ -242,45 +202,72 @@ fn push_node_to_text(s: &mut String, node: &kuchiki::NodeRef) {
     }
 }
 
-fn select(
-    element: &kuchiki::NodeRef,
-    selector: &str,
-) -> anyhow::Result<kuchiki::iter::Select<kuchiki::iter::Elements<kuchiki::iter::Descendants>>> {
-    element
-        .select(selector)
-        .ok()
-        .with_context(|| format!("Could not apply selector {}", selector))
+fn push_node_to_text(s: &mut String, node: NodeRef<'_, Node>) {
+    match node.value() {
+        Node::Text(text) => {
+            s.push_str(text);
+        }
+        Node::Element(_) => {
+            if let Some(e) = ElementRef::wrap(node) {
+                push_element_to_text(s, &e);
+            }
+        }
+        _ => {}
+    }
 }
 
-fn it_select<I: kuchiki::iter::NodeIterator>(
-    iter: I,
+fn select<'a>(
+    document: &'a Html,
     selector: &str,
-) -> anyhow::Result<kuchiki::iter::Select<kuchiki::iter::Elements<I>>> {
-    iter.select(selector)
-        .ok()
-        .with_context(|| format!("Could not apply selector {}", selector))
+) -> anyhow::Result<Vec<ElementRef<'a>>> {
+    let sel = Selector::parse(selector)
+        .map_err(|e| anyhow::anyhow!("Could not parse selector {}: {:?}", selector, e))?;
+    Ok(document.select(&sel).collect())
 }
 
-fn select_first(
-    element: &kuchiki::NodeRef,
+fn select_first<'a>(
+    document: &'a Html,
     selector: &str,
-) -> anyhow::Result<Option<kuchiki::NodeDataRef<kuchiki::ElementData>>> {
-    select(element, selector).map(|mut i| i.next())
+) -> anyhow::Result<Option<ElementRef<'a>>> {
+    let sel = Selector::parse(selector)
+        .map_err(|e| anyhow::anyhow!("Could not parse selector {}: {:?}", selector, e))?;
+    Ok(document.select(&sel).next())
 }
 
-fn it_select_first<I: kuchiki::iter::NodeIterator>(
-    iter: I,
+fn select_in_element<'a>(
+    element: &ElementRef<'a>,
     selector: &str,
-) -> anyhow::Result<Option<kuchiki::NodeDataRef<kuchiki::ElementData>>> {
-    it_select(iter, selector).map(|mut i| i.next())
+) -> anyhow::Result<Vec<ElementRef<'a>>> {
+    let sel = Selector::parse(selector)
+        .map_err(|e| anyhow::anyhow!("Could not parse selector {}: {:?}", selector, e))?;
+    Ok(element.select(&sel).collect())
 }
 
-fn get_example(node: &kuchiki::NodeRef) -> doc::Example {
-    let description_element = node
-        .parent()
-        .as_ref()
-        .and_then(NodeRefExt::previous_sibling_element);
+fn select_first_in_element<'a>(
+    element: &ElementRef<'a>,
+    selector: &str,
+) -> anyhow::Result<Option<ElementRef<'a>>> {
+    let sel = Selector::parse(selector)
+        .map_err(|e| anyhow::anyhow!("Could not parse selector {}: {:?}", selector, e))?;
+    Ok(element.select(&sel).next())
+}
+
+fn select_first_in_node<'a>(
+    node: &NodeRef<'a, Node>,
+    selector: &str,
+) -> anyhow::Result<Option<ElementRef<'a>>> {
+    if let Some(e) = ElementRef::wrap(*node) {
+        select_first_in_element(&e, selector)
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_example(element: &ElementRef<'_>) -> doc::Example {
+    // ElementRef derefs to NodeRef
+    let description_element = (*element).previous_sibling_element();
     let description = description_element
+        .and_then(|n| ElementRef::wrap(n))
         .and_then(|n| {
             if n.text_contents().ends_with(':') {
                 Some(n)
@@ -288,8 +275,8 @@ fn get_example(node: &kuchiki::NodeRef) -> doc::Example {
                 None
             }
         })
-        .map(From::from);
-    doc::Example::new(description, node.into())
+        .map(|e| element_ref_to_text(&e));
+    doc::Example::new(description, element_ref_to_code(element))
 }
 
 const MODULE_MEMBER_TYPES: &[doc::ItemType] = &[
@@ -308,8 +295,18 @@ const MODULE_MEMBER_TYPES: &[doc::ItemType] = &[
     doc::ItemType::Union,
 ];
 
-fn get_id_part(node: &kuchiki::NodeRef, i: usize) -> Option<String> {
-    // id of format <type>.<name> (or <type>.<name>-<idx> for name collisions)
+fn get_id_part_elem(element: &ElementRef<'_>, i: usize) -> Option<String> {
+    if let Some(id) = element.get_attribute("id") {
+        id.splitn(2, '.')
+            .nth(i)
+            .and_then(|s| s.splitn(2, '-').next())
+            .map(ToOwned::to_owned)
+    } else {
+        None
+    }
+}
+
+fn get_id_part_node(node: &NodeRef<'_, Node>, i: usize) -> Option<String> {
     if let Some(id) = node.get_attribute("id") {
         id.splitn(2, '.')
             .nth(i)
@@ -321,38 +318,43 @@ fn get_id_part(node: &kuchiki::NodeRef, i: usize) -> Option<String> {
 }
 
 fn get_fields(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
 ) -> anyhow::Result<(doc::ItemType, Vec<doc::MemberGroup>)> {
     let ty = doc::ItemType::StructField;
     let mut fields = MemberDocs::new(parent, ty);
     let heading = select_first(document, &format!("#{}", get_item_group_id(ty)))?;
 
-    let mut next = heading.as_ref().and_then(NodeRefExt::next_sibling_element);
+    // NodeRef is Copy so we can use by value in loops
+    let mut next: Option<NodeRef<'_, Node>> = heading
+        .as_ref()
+        .and_then(|e| (*e).next_sibling_element());
     let mut name: Option<String> = None;
     let mut definition: Option<doc::Code> = None;
 
-    while let Some(element) = &next {
-        if element.is_element(&local_name!("span")) && element.has_class("structfield") {
-            fields.push(&mut name, &mut definition, None)?;
-            name = get_id_part(element, 1);
-            definition = Some(element.into());
-        } else if element.is_element(&local_name!("div")) {
-            if element.has_class("docblock") {
-                fields.push(&mut name, &mut definition, Some(element.into()))?;
+    while let Some(element) = next {
+        if let Some(e) = ElementRef::wrap(element) {
+            if e.is_element_name("span") && e.has_class("structfield") {
+                fields.push(&mut name, &mut definition, None)?;
+                name = get_id_part_elem(&e, 1);
+                definition = Some(element_ref_to_code(&e));
+            } else if e.is_element_name("div") {
+                if e.has_class("docblock") {
+                    fields.push(&mut name, &mut definition, Some(element_ref_to_text(&e)))?;
+                }
+            } else {
+                fields.push(&mut name, &mut definition, None)?;
+                break;
             }
-        } else {
-            fields.push(&mut name, &mut definition, None)?;
-            break;
         }
-        next = element.next_sibling();
+        next = element.next_sibling_element();
     }
 
     Ok((ty, fields.into_member_groups(None)))
 }
 
 fn get_methods(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
 ) -> anyhow::Result<(doc::ItemType, Vec<doc::MemberGroup>)> {
     let ty = doc::ItemType::Method;
@@ -364,7 +366,7 @@ fn get_methods(
         parent,
         "methods".to_owned(),
         ty,
-        &local_name!("h4"),
+        "h4",
     )?);
     // Rust >= 1.45, < 1.54.0
     groups.append(&mut get_method_groups(
@@ -372,7 +374,7 @@ fn get_methods(
         parent,
         "implementations".to_owned(),
         ty,
-        &local_name!("h4"),
+        "h4",
     )?);
     // Rust >= 1.54.0
     groups.append(&mut get_method_groups(
@@ -380,19 +382,19 @@ fn get_methods(
         parent,
         "implementations".to_owned(),
         ty,
-        &local_name!("h2"),
+        "h2",
     )?);
 
     let heading = select_first(document, "#deref-methods")?;
     if let Some(heading) = heading {
-        let title = heading.as_node().text_contents();
-        if let Some(impl_items) = heading.as_node().next_sibling() {
+        let title = heading.text_contents();
+        if let Some(impl_items) = (*heading).next_sibling_element() {
             let group = get_method_group(
                 parent,
                 Some(title),
                 &impl_items,
                 doc::ItemType::Method,
-                &local_name!("h4"),
+                "h4",
             )?;
             if let Some(group) = group {
                 groups.push(group);
@@ -402,7 +404,7 @@ fn get_methods(
 
     let heading = select_first(document, "#required-methods")?;
     if let Some(heading) = heading {
-        if let Some(methods) = heading.as_node().next_sibling() {
+        if let Some(methods) = (*heading).next_sibling_element() {
             let title = "Required Methods";
             // Rust < 1.54.0
             let group = if let Some(group) = get_method_group(
@@ -410,7 +412,7 @@ fn get_methods(
                 Some(title.to_owned()),
                 &methods,
                 doc::ItemType::TyMethod,
-                &local_name!("h3"),
+                "h3",
             )? {
                 Some(group)
             } else {
@@ -420,7 +422,7 @@ fn get_methods(
                     Some(title.to_owned()),
                     &methods,
                     doc::ItemType::TyMethod,
-                    &local_name!("h4"),
+                    "h4",
                 )?
             };
             if let Some(group) = group {
@@ -431,7 +433,7 @@ fn get_methods(
 
     let heading = select_first(document, "#provided-methods")?;
     if let Some(heading) = heading {
-        if let Some(methods) = heading.as_node().next_sibling() {
+        if let Some(methods) = (*heading).next_sibling_element() {
             let title = "Provided Methods";
             // Rust < 1.54.0
             let group = if let Some(group) = get_method_group(
@@ -439,7 +441,7 @@ fn get_methods(
                 Some(title.to_owned()),
                 &methods,
                 doc::ItemType::TyMethod,
-                &local_name!("h3"),
+                "h3",
             )? {
                 Some(group)
             } else {
@@ -449,7 +451,7 @@ fn get_methods(
                     Some(title.to_owned()),
                     &methods,
                     doc::ItemType::TyMethod,
-                    &local_name!("h4"),
+                    "h4",
                 )?
             };
             if let Some(group) = group {
@@ -462,7 +464,7 @@ fn get_methods(
 }
 
 fn get_assoc_types(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
 ) -> anyhow::Result<(doc::ItemType, Vec<doc::MemberGroup>)> {
     let ty = doc::ItemType::AssocType;
@@ -470,14 +472,14 @@ fn get_assoc_types(
 
     let heading = select_first(document, "#associated-types")?;
     if let Some(heading) = heading {
-        if let Some(methods) = heading.as_node().next_sibling() {
+        if let Some(methods) = (*heading).next_sibling_element() {
             // Rust < 1.54.0
             let group = if let Some(group) = get_method_group(
                 parent,
                 None,
                 &methods,
                 doc::ItemType::AssocType,
-                &local_name!("h3"),
+                "h3",
             )? {
                 Some(group)
             } else {
@@ -487,7 +489,7 @@ fn get_assoc_types(
                     None,
                     &methods,
                     doc::ItemType::AssocType,
-                    &local_name!("h4"),
+                    "h4",
                 )?
             };
             if let Some(group) = group {
@@ -500,44 +502,51 @@ fn get_assoc_types(
 }
 
 fn get_method_groups(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
     heading_id: String,
     ty: doc::ItemType,
-    subheading_type: &markup5ever::LocalName,
+    subheading_type: &str,
 ) -> anyhow::Result<Vec<doc::MemberGroup>> {
     let mut groups: Vec<doc::MemberGroup> = Vec::new();
     let heading = select_first(document, &format!("#{}", heading_id))?;
-    let mut next = heading.as_ref().and_then(NodeRefExt::next_sibling_element);
+    let mut next: Option<NodeRef<'_, Node>> = heading
+        .as_ref()
+        .and_then(|e| (*e).next_sibling_element());
 
     while let Some(subheading) = next.take() {
-        if subheading.is_element(&local_name!("h3")) && subheading.has_class("impl") {
-            if let Some(title) = subheading.first_child() {
-                if let Some(impl_items) = subheading.next_sibling() {
+        if let Some(e) = ElementRef::wrap(subheading) {
+            if e.is_element_name("h3") && e.has_class("impl") {
+                // Get first element child as title
+                let title_node = subheading.children().find(|n| n.value().is_element());
+                let impl_items_node = subheading.next_sibling_element();
+                if let (Some(title), Some(impl_items)) = (title_node, impl_items_node) {
                     if let Some(group) =
                         get_impl_items(parent, &title, &impl_items, ty, subheading_type)?
                     {
                         groups.push(group);
                     }
-                    next = impl_items.next_sibling();
+                    next = impl_items.next_sibling_element();
                 }
-            }
-        } else if subheading.is_element(&local_name!("details")) {
-            if let Some(summary) = subheading.first_child() {
-                let h3 = select_first(&summary, "h3")?;
-                if let Some(title) = h3.map(|n| {
-                    n.as_node()
-                        .first_child()
-                        .filter(|n| n.is_element(&local_name!("code")))
-                        .unwrap_or_else(|| n.as_node().to_owned())
-                }) {
-                    if let Some(impl_items) = summary.next_sibling() {
-                        if let Some(group) =
-                            get_impl_items(parent, &title, &impl_items, ty, subheading_type)?
-                        {
-                            groups.push(group);
+            } else if e.is_element_name("details") {
+                let summary_node = subheading.children().find(|n| n.value().is_element());
+                if let Some(summary) = summary_node {
+                    let h3 = select_first_in_node(&summary, "h3")?;
+                    if let Some(h3_elem) = h3 {
+                        // Prefer first child code element, else use whole h3 node
+                        let title: NodeRef<'_, Node> = (*h3_elem)
+                            .children()
+                            .find(|n| n.is_element_name("code"))
+                            .unwrap_or(*h3_elem);
+                        let impl_items_node = summary.next_sibling_element();
+                        if let Some(impl_items) = impl_items_node {
+                            if let Some(group) =
+                                get_impl_items(parent, &title, &impl_items, ty, subheading_type)?
+                            {
+                                groups.push(group);
+                            }
+                            next = subheading.next_sibling_element();
                         }
-                        next = subheading.next_sibling();
                     }
                 }
             }
@@ -549,13 +558,13 @@ fn get_method_groups(
 
 fn get_impl_items(
     parent: &doc::Fqn,
-    title: &kuchiki::NodeRef,
-    impl_items: &kuchiki::NodeRef,
+    title: &NodeRef<'_, Node>,
+    impl_items: &NodeRef<'_, Node>,
     ty: doc::ItemType,
-    subheading_type: &markup5ever::LocalName,
+    subheading_type: &str,
 ) -> anyhow::Result<Option<doc::MemberGroup>> {
     let title = title.text_contents();
-    if impl_items.is_element(&local_name!("div")) && impl_items.has_class("impl-items") {
+    if impl_items.is_element_name("div") && impl_items.has_class("impl-items") {
         get_method_group(parent, Some(title), impl_items, ty, subheading_type)
     } else {
         Ok(None)
@@ -565,34 +574,41 @@ fn get_impl_items(
 fn get_method_group(
     parent: &doc::Fqn,
     title: Option<String>,
-    impl_items: &kuchiki::NodeRef,
+    impl_items: &NodeRef<'_, Node>,
     ty: doc::ItemType,
-    heading_type: &markup5ever::LocalName,
+    heading_type: &str,
 ) -> anyhow::Result<Option<doc::MemberGroup>> {
     let mut methods = MemberDocs::new(parent, ty);
 
     let mut name: Option<String> = None;
     let mut definition: Option<doc::Code> = None;
     for element in impl_items.children() {
-        if element.is_element(heading_type) && element.has_class("method") {
+        if element.is_element_name(heading_type) && element.has_class("method") {
             methods.push(&mut name, &mut definition, None)?;
-            name = get_id_part(&element, 1);
-            definition = it_select_first(element.children(), "code")?.map(From::from);
-        } else if element.is_element(&local_name!("div")) && element.has_class("docblock") {
-            methods.push(&mut name, &mut definition, Some(element.into()))?;
-        } else if element.is_element(&local_name!("details")) {
+            name = get_id_part_node(&element, 1);
+            definition = select_first_in_node(&element, "code")?.map(|e| element_ref_to_code(&e));
+        } else if element.is_element_name("div") && element.has_class("docblock") {
+            if let Some(e) = ElementRef::wrap(element) {
+                methods.push(&mut name, &mut definition, Some(element_ref_to_text(&e)))?;
+            }
+        } else if element.is_element_name("details") {
             // Since Rust 1.54.0, the heading and the docblock are wrapped in details and summary
             // elements.
-            if let Some(div) = select_first(&element, "summary div.method")? {
-                if div.as_node().children().any(|n| n.is_element(heading_type)) {
+            if let Some(div) = select_first_in_node(&element, "summary div.method")? {
+                // div derefes to NodeRef
+                if (*div).children().any(|n| n.is_element_name(heading_type)) {
                     methods.push(&mut name, &mut definition, None)?;
-                    name = get_id_part(div.as_node(), 1);
-                    definition =
-                        it_select_first(div.as_node().children(), ".code-header")?.map(From::from);
+                    name = get_id_part_elem(&div, 1);
+                    definition = select_first_in_element(&div, ".code-header")?
+                        .map(|e| element_ref_to_code(&e));
                 }
             }
-            if let Some(docblock) = select_first(&element, "div.docblock")? {
-                methods.push(&mut name, &mut definition, Some(docblock.into()))?;
+            if let Some(docblock) = select_first_in_node(&element, "div.docblock")? {
+                methods.push(
+                    &mut name,
+                    &mut definition,
+                    Some(element_ref_to_text(&docblock)),
+                )?;
             }
         }
     }
@@ -601,30 +617,36 @@ fn get_method_group(
 }
 
 fn get_variants(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
 ) -> anyhow::Result<(doc::ItemType, Vec<doc::MemberGroup>)> {
     let ty = doc::ItemType::Variant;
     let mut variants = MemberDocs::new(parent, ty);
     let heading = select_first(document, &format!("#{}", get_item_group_id(ty)))?;
 
-    let mut next = heading.as_ref().and_then(NodeRefExt::next_sibling_element);
+    let mut next: Option<NodeRef<'_, Node>> = heading
+        .as_ref()
+        .and_then(|e| (*e).next_sibling_element());
     let mut name: Option<String> = None;
     let mut definition: Option<doc::Code> = None;
     while let Some(element) = &next {
-        if element.is_element(&local_name!("div")) {
-            if element.has_class("variant") {
-                variants.push(&mut name, &mut definition, None)?;
-                name = get_id_part(element, 1);
-                definition = Some(element.into());
-            } else if element.has_class("docblock") {
-                variants.push(&mut name, &mut definition, Some(element.into()))?;
-            }
+        if let Some(e) = ElementRef::wrap(*element) {
+            if e.is_element_name("div") {
+                if e.has_class("variant") {
+                    variants.push(&mut name, &mut definition, None)?;
+                    name = get_id_part_elem(&e, 1);
+                    definition = Some(element_ref_to_code(&e));
+                } else if e.has_class("docblock") {
+                    variants.push(&mut name, &mut definition, Some(element_ref_to_text(&e)))?;
+                }
 
-            next = element.next_sibling();
+                next = element.next_sibling_element();
+            } else {
+                variants.push(&mut name, &mut definition, None)?;
+                break;
+            }
         } else {
-            variants.push(&mut name, &mut definition, None)?;
-            break;
+            next = element.next_sibling_element();
         }
     }
 
@@ -632,7 +654,7 @@ fn get_variants(
 }
 
 fn get_implementations(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
 ) -> anyhow::Result<(doc::ItemType, Vec<doc::MemberGroup>)> {
     let mut groups: Vec<doc::MemberGroup> = Vec::new();
@@ -659,7 +681,7 @@ fn get_implementations(
 }
 
 fn get_implementation_group(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
     title: &str,
     list_id: &str,
@@ -669,30 +691,48 @@ fn get_implementation_group(
     let list_div = select_first(document, &format!("#{}", list_id))?;
 
     if let Some(list_div) = list_div {
-        for item in list_div.as_node().children() {
-            let h3 = if item.is_element(&local_name!("details")) {
-                if let Some(summary) = item.first_child() {
-                    select_first(&summary, "h3.impl, h3.code-header")?
-                        .map(|n| n.as_node().to_owned())
+        // list_div derefs to NodeRef
+        for item in (*list_div).children() {
+            let h3: Option<NodeRef<'_, Node>> =
+                if item.is_element_name("details") {
+                    let summary = item.children().find(|n| n.value().is_element());
+                    if let Some(summary) = summary {
+                        select_first_in_node(&summary, "h3.impl, h3.code-header")?
+                            .map(|e| *e)
+                    } else {
+                        None
+                    }
+                } else if item.is_element_name("h3") && item.has_class("impl") {
+                    Some(item)
+                } else if item.is_element_name("div") && item.has_class("impl") {
+                    select_first_in_node(&item, "h3")?
+                        .map(|e| *e)
                 } else {
                     None
-                }
-            } else if item.is_element(&local_name!("h3")) && item.has_class("impl") {
-                Some(item)
-            } else if item.is_element(&local_name!("div")) && item.has_class("impl") {
-                select_first(&item, "h3")?.map(|n| n.as_node().to_owned())
-            } else {
-                None
-            };
+                };
 
             if let Some(h3) = h3 {
-                let a = select_first(&h3, "a")?;
-                let mut name = a.map(|n| n.as_node().text_contents());
+                let a = select_first_in_node(&h3, "a")?;
+                let mut name = a.map(|n| n.text_contents());
+                let first_child_code = h3
+                    .children()
+                    .find(|n| n.is_element_name("code"));
                 let mut definition = Some(
-                    h3.first_child()
-                        .filter(|n| n.is_element(&local_name!("code")))
-                        .map(doc::Code::from)
-                        .unwrap_or_else(|| h3.into()),
+                    first_child_code
+                        .map(|n| {
+                            if let Some(e) = ElementRef::wrap(n) {
+                                element_ref_to_code(&e)
+                            } else {
+                                doc::Code::new(n.text_contents())
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            if let Some(e) = ElementRef::wrap(h3) {
+                                element_ref_to_code(&e)
+                            } else {
+                                doc::Code::new(h3.text_contents())
+                            }
+                        }),
                 );
                 impls.push(&mut name, &mut definition, None)?;
             }
@@ -705,19 +745,23 @@ fn get_implementation_group(
 }
 
 fn get_members(
-    document: &kuchiki::NodeRef,
+    document: &Html,
     parent: &doc::Fqn,
     ty: doc::ItemType,
 ) -> anyhow::Result<Vec<doc::Doc>> {
     let mut members: Vec<doc::Doc> = Vec::new();
     if let Some(table) = select_first(document, &format!("#{} + table", get_item_group_id(ty)))? {
-        let items = select(table.as_node(), "td:first-child > :first-child")?;
+        let items: Vec<_> = select_in_element(&table, "td:first-child > :first-child")?;
         for item in items {
-            let item_name = item.as_node().text_contents();
-            let docblock = item.as_node().parent().and_then(|n| n.next_sibling());
+            let item_name = item.text_contents();
+            // item derefs to NodeRef
+            let docblock = (*item)
+                .parent()
+                .and_then(|n| n.next_sibling_element())
+                .and_then(|n| ElementRef::wrap(n));
 
             let mut doc = doc::Doc::new(parent.child(&item_name), ty);
-            doc.description = docblock.map(From::from);
+            doc.description = docblock.map(|e| element_ref_to_text(&e));
             members.push(doc);
         }
     }
@@ -725,14 +769,17 @@ fn get_members(
         document,
         &format!("#{} + div.item-table", get_item_group_id(ty)),
     )? {
-        let mut iter = div.as_node().children();
+        // div derefs to NodeRef
+        let mut iter = (*div).children();
         while let (Some(item), Some(docblock)) = (iter.next(), iter.next()) {
             if !item.has_class("module-item") || !docblock.has_class("docblock-short") {
                 continue;
             }
             let item_name = item.text_contents();
             let mut doc = doc::Doc::new(parent.child(&item_name), ty);
-            doc.description = Some(docblock.into());
+            if let Some(e) = ElementRef::wrap(docblock) {
+                doc.description = Some(element_ref_to_text(&e));
+            }
             members.push(doc);
         }
     }
@@ -747,10 +794,7 @@ const MEMBER_TYPES: &[doc::ItemType] = &[
     doc::ItemType::Method,
 ];
 
-fn get_member(
-    document: &kuchiki::NodeRef,
-    name: &str,
-) -> anyhow::Result<Option<kuchiki::NodeDataRef<kuchiki::ElementData>>> {
+fn get_member<'a>(document: &'a Html, name: &str) -> anyhow::Result<Option<ElementRef<'a>>> {
     let selectors: Vec<_> = MEMBER_TYPES
         .iter()
         .map(|ty| get_member_selector(*ty, name))

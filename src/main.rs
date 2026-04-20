@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     if let Some(doc) = doc {
-        let viewer = args.viewer.unwrap_or_else(viewer::get_default);
+        let viewer = args.get_viewer()?.unwrap_or_else(viewer::get_default);
         if args.examples {
             let examples = doc.find_examples()?;
             anyhow::ensure!(

@@ -4,9 +4,9 @@
 use std::fs;
 use std::path;
 
+use clap::Parser;
 use merge::Merge;
 use serde::Deserialize;
-use structopt::StructOpt;
 
 use crate::doc;
 use crate::viewer;
@@ -20,10 +20,10 @@ use crate::viewer;
 /// see `rustc --print sysroot`, or /usr).  Use the -s/--source option if you want to read the
 /// documentation from a different directory.
 ///
-/// rusty-man tries to find an item that exactly matches the given keyword.  If it doesn’t find an
+/// rusty-man tries to find an item that exactly matches the given keyword.  If it doesn't find an
 /// exact match, it reads the search indexes of all available sources and tries to find a partial
 /// match.
-#[derive(Debug, Default, Deserialize, Merge, StructOpt)]
+#[derive(Debug, Default, Deserialize, Merge, Parser)]
 #[serde(default)]
 pub struct Args {
     /// The keyword to open the documentation for, e. g. `rand_core::RngCore`
@@ -36,13 +36,13 @@ pub struct Args {
     /// Typically, this is the path of a directory containing the documentation for one or more
     /// crates in subdirectories.
     #[merge(strategy = merge::vec::prepend)]
-    #[structopt(name = "source", short, long, number_of_values = 1)]
+    #[arg(name = "source", short, long)]
     pub source_paths: Vec<String>,
 
     /// The viewer for the rustdoc documentation (one of: plain, rich, tui)
-    #[structopt(long, parse(try_from_str = viewer::get_viewer))]
-    #[serde(deserialize_with = "deserialize_viewer")]
-    pub viewer: Option<Box<dyn viewer::Viewer>>,
+    #[arg(long)]
+    #[serde(deserialize_with = "deserialize_viewer", default)]
+    pub viewer: Option<ViewerName>,
 
     /// Do not search the default documentation sources
     ///
@@ -51,7 +51,7 @@ pub struct Args {
     /// --print sysroot` or `/usr` if that command does not output a valid path.  `$target` is
     /// `$CARGO_TARGET_DIR`, `$CARGO_BUILD_TARGET_DIR` or `./target`.
     #[merge(strategy = merge::bool::overwrite_false)]
-    #[structopt(long)]
+    #[arg(long)]
     pub no_default_sources: bool,
 
     /// Do not read the search index if there is no exact match
@@ -60,34 +60,61 @@ pub struct Args {
     /// items if there is no exact match for the keyword.  If this option is set, the search
     /// indexes are not read.
     #[merge(strategy = merge::bool::overwrite_false)]
-    #[structopt(long)]
+    #[arg(long)]
     pub no_search: bool,
 
     /// Show all examples for the item instead of opening the full documentation.
     #[merge(strategy = merge::bool::overwrite_false)]
-    #[structopt(short, long)]
+    #[arg(short, long)]
     pub examples: bool,
 
     /// The path to the configuration file to read
     ///
     /// Per default, rusty-man tries to read defaults for the command-line arguments from the
     /// config.toml file in the user configuration directory according to the XDG Base Directory
-    /// Specification, i. e. ${XDG_USER_CONFIG}/rusty-man/config.toml, where ${XDG_USER_CONFIG}
+    /// Specification, i. e. ${XDG_USER_CONFIG}/manrs/config.toml, where ${XDG_USER_CONFIG}
     /// defaults to ${HOME}/.config.
     ///
     /// If this option is set, rusty-man reads the given configuration file instead.  If this
     /// option is set to "-", rusty-man does not read any configuration files.
     #[merge(skip)]
-    #[structopt(short, long)]
+    #[arg(short, long)]
     #[serde(skip)]
     pub config_file: Option<String>,
 
-    #[structopt(flatten)]
+    #[command(flatten)]
     #[serde(flatten)]
     pub viewer_args: ViewerArgs,
 }
 
-#[derive(Debug, Default, Deserialize, Merge, StructOpt)]
+/// A wrapper for the viewer name, so it can be used with clap's value_parser.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(transparent)]
+pub struct ViewerName(pub String);
+
+impl std::str::FromStr for ViewerName {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(ViewerName(s.to_owned()))
+    }
+}
+
+impl ViewerName {
+    pub fn to_viewer(&self) -> anyhow::Result<Box<dyn viewer::Viewer>> {
+        viewer::get_viewer(&self.0)
+    }
+}
+
+impl merge::Merge for ViewerName {
+    fn merge(&mut self, other: Self) {
+        if self.0.is_empty() {
+            *self = other;
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Merge, Parser)]
 #[serde(default)]
 pub struct ViewerArgs {
     /// Disable syntax highlighting.
@@ -95,7 +122,7 @@ pub struct ViewerArgs {
     /// Per default, rusty-man tries to highlight Rust code snippets in its output if the rich or
     /// tui viewer is selected.  If this option is set, it renders the HTML representation instead.
     #[merge(strategy = merge::bool::overwrite_false)]
-    #[structopt(long)]
+    #[arg(long)]
     pub no_syntax_highlight: bool,
 
     /// The color theme for syntax highlighting
@@ -103,7 +130,7 @@ pub struct ViewerArgs {
     /// rusty-man includes these color themes: base16-ocean.dark, base16-eighties.dark,
     /// base16-mocha.dark, base16-ocean.light, InspiredGitHub, Solarized (dark), Solarized (light).
     /// Default value: base16-eighties.dark.
-    #[structopt(long)]
+    #[arg(long)]
     pub theme: Option<String>,
 
     /// The width of the text output
@@ -111,33 +138,37 @@ pub struct ViewerArgs {
     /// Per default, rusty-man sets the width of the text output based on the width of the terminal
     /// with the maximum width given by --max-width.  If this option is set, it uses the given
     /// width instead.
-    #[structopt(long)]
+    #[arg(long)]
     pub width: Option<usize>,
 
     /// The maximum width of the text output
     ///
     /// Unless the --width option is set, rusty-man sets the width of the text output based on the
     /// width of the terminal with the maximum width set with this option.
-    #[structopt(long)]
+    #[arg(long)]
     pub max_width: Option<usize>,
 
     /// The pager to use for the plain and rich viewers.
     ///
     /// Per default, rusty-man uses the pager set in the PAGER environment variable, or less if
     /// this environment variable is not set.
-    #[structopt(long)]
+    #[arg(long)]
     pub pager: Option<String>,
 }
 
 impl Args {
     pub fn load() -> anyhow::Result<Args> {
-        let mut args = Args::from_args();
+        let mut args = Args::parse();
 
         if let Some(config) = Args::load_config(args.config_file.as_deref())? {
             args.merge(config);
         }
 
         Ok(args)
+    }
+
+    pub fn get_viewer(&self) -> anyhow::Result<Option<Box<dyn viewer::Viewer>>> {
+        self.viewer.as_ref().map(|v| v.to_viewer()).transpose()
     }
 
     fn load_config(file: Option<&str>) -> anyhow::Result<Option<Args>> {
@@ -148,7 +179,7 @@ impl Args {
                 Some(path::PathBuf::from(file))
             }
         } else {
-            let dirs = xdg::BaseDirectories::with_prefix("rusty-man")?;
+            let dirs = xdg::BaseDirectories::with_prefix("manrs");
             dirs.find_config_file("config.toml")
         };
         if let Some(path) = path {
@@ -161,13 +192,10 @@ impl Args {
     }
 }
 
-fn deserialize_viewer<'de, D>(d: D) -> Result<Option<Box<dyn viewer::Viewer>>, D::Error>
+fn deserialize_viewer<'de, D>(d: D) -> Result<Option<ViewerName>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
-
-    let s: Option<&str> = Deserialize::deserialize(d)?;
-    s.map(|s| viewer::get_viewer(s).map_err(D::Error::custom))
-        .transpose()
+    let s: Option<String> = Deserialize::deserialize(d)?;
+    Ok(s.map(ViewerName))
 }
