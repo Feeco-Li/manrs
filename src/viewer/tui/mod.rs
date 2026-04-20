@@ -87,7 +87,7 @@ impl Context {
         })
     }
 
-    pub fn create_renderer(&self, doc: &doc::Doc) -> TuiManRenderer {
+    pub fn create_renderer(&self, doc: &doc::Doc) -> TuiManRenderer<'_> {
         TuiManRenderer::new(
             doc,
             self.args.max_width.unwrap_or(100),
@@ -344,24 +344,17 @@ fn open_doc(s: &mut cursive::Cursive, doc: &doc::Doc) {
 }
 
 fn open_link(s: &mut cursive::Cursive, link: ResolvedLink) -> anyhow::Result<()> {
-    match link {
-        ResolvedLink::Doc(ty, name) => {
-            let doc = context(s)
-                .sources
-                .find(&name, ty)?
-                .with_context(|| format!("Could not find documentation for item: {}", name))?;
-            open_doc(s, &doc);
-            Ok(())
-        }
-        ResolvedLink::External(link) => webbrowser::open(&link)
-            .map(|_| {})
-            .context("Failed to open web browser"),
-    }
+    let ResolvedLink::Doc(ty, name) = link;
+    let doc = context(s)
+        .sources
+        .find(&name, ty)?
+        .with_context(|| format!("Could not find documentation for item: {}", name))?;
+    open_doc(s, &doc);
+    Ok(())
 }
 
 enum ResolvedLink {
     Doc(Option<doc::ItemType>, doc::Fqn),
-    External(String),
 }
 
 impl From<utils::DocLink> for ResolvedLink {

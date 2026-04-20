@@ -40,7 +40,7 @@ impl utils::ManRenderer for RichTextRenderer {
         } else {
             indent
         };
-        let decorator = utils::RichDecorator::new(super::list_link, utils::LinkMode::List);
+        let decorator = utils::RichDecorator::new(super::list_link);
         let lines = html2text::config::with_decorator(decorator)
             .lines_from_read(s.html.as_bytes(), self.line_length - indent)
             .unwrap_or_default();
