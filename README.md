@@ -67,7 +67,7 @@ $ manrs --viewer tui std::vec::Vec
 ```
 $ git clone https://github.com/Feeco-Li/manrs
 $ cd manrs
-$ cargo install --path . --locked
+$ cargo install --path .
 ```
 
 ### System docs

@@ -64,5 +64,5 @@ Integration tests in `tests/output.rs` use `insta` snapshots in `tests/snapshots
 ## Known limitations
 
 - The search index parser only supports rustdoc formats up to Rust 1.56. Post-1.56 docs fall back to direct HTML lookup (no search index).
-- `text-style 0.3` requires `cursive 0.16` as a transitive dep; use `cargo install --locked` to avoid resolution conflicts until text-style is upgraded.
+- `text-style 0.3` is only used for its `termion` and `syntect` features — the `cursive` feature is intentionally excluded to avoid pulling in the yanked cursive 0.16.
 - External link opening in the TUI was removed when `cursive-markup` was dropped.
