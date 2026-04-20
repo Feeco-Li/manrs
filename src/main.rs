@@ -32,12 +32,6 @@
 //! format.  As the format of the HTML files is not specified, rusty-man might not work with new
 //! Rust versions that change the documentation format.
 
-// We have to disable some clippy lints as our MSRV is 1.40:
-#![allow(
-    // slice::strip_suffix added in 1.51
-    clippy::manual_strip,
-)]
-
 mod args;
 mod doc;
 mod index;
@@ -55,13 +49,19 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let args = args::Args::load()?;
+
+    let keyword = match resolve_keyword(&args)? {
+        Some(kw) => kw,
+        None => return Ok(()), // user cancelled the picker
+    };
+
     let sources = load_sources(&args.source_paths, !args.no_default_sources)?;
-    let doc = if let Some(doc) = sources.find(&args.keyword, None)? {
+    let doc = if let Some(doc) = sources.find(&keyword, None)? {
         Some(doc)
     } else if !args.no_search {
-        search_doc(&sources, &args.keyword)?
+        search_doc(&sources, &keyword)?
     } else {
-        anyhow::bail!("Could not find documentation for {}", &args.keyword);
+        anyhow::bail!("Could not find documentation for {}", &keyword);
     };
 
     if let Some(doc) = doc {
@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::ensure!(
                 !examples.is_empty(),
                 "Could not find examples for {}",
-                &args.keyword
+                &keyword
             );
             viewer.open_examples(sources, args.viewer_args, &doc, examples)
         } else {
@@ -81,6 +81,35 @@ fn main() -> anyhow::Result<()> {
         // item selection cancelled by user
         Ok(())
     }
+}
+
+/// Resolve the keyword: use the provided one, or show an interactive crate picker.
+fn resolve_keyword(args: &args::Args) -> anyhow::Result<Option<doc::Name>> {
+    if let Some(kw) = &args.keyword {
+        return Ok(Some(kw.clone()));
+    }
+
+    // No keyword: show crate picker, auto-running cargo doc if needed.
+    let sources = load_sources(&args.source_paths, !args.no_default_sources)?;
+    let mut crates = sources.list_crates();
+
+    if crates.is_empty() {
+        if !ensure_docs()? {
+            anyhow::bail!(
+                "No documentation found. Run 'cargo doc' first, or provide a keyword."
+            );
+        }
+        // Reload after generating docs
+        let sources = load_sources(&args.source_paths, !args.no_default_sources)?;
+        crates = sources.list_crates();
+    }
+
+    anyhow::ensure!(
+        !crates.is_empty(),
+        "No documentation found after running cargo doc."
+    );
+
+    pick_crate(&crates)
 }
 
 /// Load all sources given as a command-line argument and, if enabled, the default sources.
@@ -111,17 +140,24 @@ fn load_sources(sources: &[String], load_default_sources: bool) -> anyhow::Resul
 }
 
 fn get_default_sources() -> Vec<path::PathBuf> {
-    let mut default_sources = Vec::new();
+    let mut sources = Vec::new();
 
     let sysroot = get_sysroot().unwrap_or_else(|| path::PathBuf::from("/usr"));
-    default_sources.push(sysroot.join("share/doc/rust/html"));
-    default_sources.push(sysroot.join("share/doc/rust-doc/html"));
+    sources.push(sysroot.join("share/doc/rust/html"));
+    sources.push(sysroot.join("share/doc/rust-doc/html"));
 
-    let mut target_dir = get_target_dir();
-    target_dir.push("doc");
-    default_sources.push(target_dir);
+    // Env-var-based target dir (./target if not set)
+    let env_doc_dir = get_target_dir().join("doc");
+    sources.push(env_doc_dir.clone());
 
-    default_sources
+    // Workspace root target/doc (handles subdirectories of a workspace)
+    if let Some(ws_doc_dir) = get_workspace_doc_dir() {
+        if ws_doc_dir != env_doc_dir {
+            sources.push(ws_doc_dir);
+        }
+    }
+
+    sources
 }
 
 fn get_sysroot() -> Option<path::PathBuf> {
@@ -140,6 +176,75 @@ fn get_target_dir() -> path::PathBuf {
         .or_else(|| env::var_os("CARGO_BUILD_TARGET_DIR"))
         .map(From::from)
         .unwrap_or_else(|| "./target".into())
+}
+
+/// Derive target/doc from the Cargo workspace root via `cargo metadata`.
+fn get_workspace_doc_dir() -> Option<path::PathBuf> {
+    // Don't override if the user set an explicit target dir
+    if env::var_os("CARGO_TARGET_DIR").is_some() || env::var_os("CARGO_BUILD_TARGET_DIR").is_some()
+    {
+        return None;
+    }
+    let output = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let workspace_root = json["workspace_root"].as_str()?;
+    Some(path::PathBuf::from(workspace_root).join("target").join("doc"))
+}
+
+/// Run `cargo doc` if we are inside a Cargo project. Returns true on success.
+fn ensure_docs() -> anyhow::Result<bool> {
+    let in_project = std::process::Command::new("cargo")
+        .args(["locate-project", "--quiet"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !in_project {
+        return Ok(false);
+    }
+
+    eprintln!("Documentation not found. Running cargo doc...");
+    let status = std::process::Command::new("cargo")
+        .arg("doc")
+        .status()?;
+
+    Ok(status.success())
+}
+
+/// Show an interactive numbered list of crates and return the chosen one.
+fn pick_crate(crates: &[String]) -> anyhow::Result<Option<doc::Name>> {
+    use std::io::Write;
+    use std::str::FromStr;
+
+    anyhow::ensure!(
+        termion::is_tty(&io::stdin()),
+        "No keyword provided and stdin is not a TTY — please provide a keyword."
+    );
+
+    println!("Select a crate to browse:");
+    println!();
+    let width = crates.len().to_string().len();
+    for (i, name) in crates.iter().enumerate() {
+        println!("[ {:width$} ] {}", i, name, width = width);
+    }
+    println!();
+    print!("> ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    if let Ok(i) = usize::from_str(input.trim()) {
+        Ok(crates.get(i).map(|s| s.clone().into()))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Use the search index to find the documentation for an item that partially matches the given

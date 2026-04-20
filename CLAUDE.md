@@ -61,6 +61,16 @@ Integration tests in `tests/output.rs` use `insta` snapshots in `tests/snapshots
 
 `RUSTY_MAN_GENERATE=1` additionally generates docs via `cargo doc` for the running toolchain and tests against that output.
 
+## No-keyword mode (crate picker)
+
+When `manrs` is run with no keyword inside a Cargo project:
+1. Detects `target/doc` via `cargo metadata` (workspace-aware, not just `./target`)
+2. If no docs exist, auto-runs `cargo doc`
+3. Lists available crates with a numbered picker (`pick_crate` in `main.rs`)
+4. Opens the selected crate name as the keyword
+
+Key functions in `main.rs`: `resolve_keyword`, `pick_crate`, `ensure_docs`, `get_workspace_doc_dir`.
+
 ## Known limitations
 
 - The search index parser only supports rustdoc formats up to Rust 1.56. Post-1.56 docs fall back to direct HTML lookup (no search index).

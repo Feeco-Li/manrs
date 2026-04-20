@@ -20,6 +20,7 @@ pub trait Source {
         ty: Option<doc::ItemType>,
     ) -> anyhow::Result<Option<doc::Doc>>;
     fn load_index(&self) -> anyhow::Result<Option<index::Index>>;
+    fn list_crates(&self) -> Vec<String>;
 }
 
 /// A collection of sources.
@@ -38,6 +39,14 @@ pub struct DirSource {
 impl Sources {
     pub fn new(sources: Vec<Box<dyn Source>>) -> Sources {
         Sources(sources)
+    }
+
+    /// List all crate names available across all sources, sorted and deduplicated.
+    pub fn list_crates(&self) -> Vec<String> {
+        let mut crates: Vec<String> = self.0.iter().flat_map(|s| s.list_crates()).collect();
+        crates.sort();
+        crates.dedup();
+        crates
     }
 
     /// Find the documentation for an item with the given name (exact matches only).
@@ -247,6 +256,20 @@ impl Source for DirSource {
         }
         log::info!("Could not find search index for '{}'", self.path.display());
         Ok(None)
+    }
+
+    fn list_crates(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&self.path) else {
+            return Vec::new();
+        };
+        let mut crates: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| e.path().join("all.html").is_file())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        crates.sort();
+        crates
     }
 }
 

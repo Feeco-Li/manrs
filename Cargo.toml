@@ -3,7 +3,7 @@
 
 [package]
 name = "manrs"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Feeco <lifeike67@gmail.com>"]
 edition = "2021"
 description = "Command-line viewer for rustdoc documentation (modernized fork of rusty-man)"
