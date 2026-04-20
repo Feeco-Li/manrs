@@ -40,8 +40,13 @@ manrs is a CLI viewer for rustdoc-generated HTML documentation. The lookup pipel
 4. **`index.rs`** — parses `search-index.js` for partial matching; `index/v1_44.rs` and `index/v1_52.rs` handle two index format versions (changed in Rust 1.44 and 1.52). Post-1.56 rustdoc index formats are not yet supported.
 5. **`doc.rs`** — core data types: `Name`/`Fqn`, `ItemType`, `Doc`, `Text`, `Code`, `Example`.
 6. **`viewer/`** — `Viewer` trait with three implementations:
-   - `viewer/text/` — `plain` (no formatting) and `rich` (ANSI + syntax highlighting via syntect); auto-selected based on TTY detection.
-   - `viewer/tui/` — interactive terminal UI using `cursive 0.21`.
+   - `viewer/text/` — `plain` (no formatting) and `rich` (ANSI + syntax highlighting via syntect).
+   - `viewer/tui/` — interactive terminal UI using `cursive 0.21`. **Default on TTY.** Key internals:
+     - `TuiManRenderer` renders sections as a `LinearLayout` of `TextView`/`LinkView`/`CodeView` children inside a `ScrollView`.
+     - `LinkView` (in `views.rs`) is a focusable view that renders cyan underlined text and fires a callback on Enter.
+     - `j`/`k` simulate Tab/Shift-Tab for link-to-link focus traversal; `J`/`K` scroll line-by-line.
+     - `pick_crate()` is a separate full-screen cursive session (filter + select) that runs before the doc viewer session.
+     - `extract_doc_links` + `parse_doc_url` parse `<a href>` tags in HTML text blocks and render them as navigable `LinkView` items below each paragraph.
 
 ## Dependencies (key ones)
 
@@ -66,13 +71,19 @@ Integration tests in `tests/output.rs` use `insta` snapshots in `tests/snapshots
 When `manrs` is run with no keyword inside a Cargo project:
 1. Detects `target/doc` via `cargo metadata` (workspace-aware, not just `./target`)
 2. If no docs exist, auto-runs `cargo doc`
-3. Lists available crates with a numbered picker (`pick_crate` in `main.rs`)
-4. Opens the selected crate name as the keyword
+3. Opens a full-screen TUI crate picker (`viewer::tui::pick_crate`) — type to filter, Enter to select
+4. The selected crate name becomes the keyword; the TUI doc viewer opens next
 
-Key functions in `main.rs`: `resolve_keyword`, `pick_crate`, `ensure_docs`, `get_workspace_doc_dir`.
+Key functions: `resolve_keyword`, `ensure_docs`, `get_workspace_doc_dir` in `main.rs`; `pick_crate` in `src/viewer/tui/mod.rs`.
+
+## TUI link navigation
+
+- Member headings in modules are rendered as `LinkView` (cyan, underlined, focusable).
+- `j`/`k` simulate Tab/Shift-Tab to jump between `LinkView` items; `ScrollView` auto-scrolls to follow focus.
+- `print_text` also calls `extract_doc_links` (scraper + `parse_doc_url`) to turn `<a href>` anchors in description HTML into `→ linkname` `LinkView` items rendered below each paragraph. URLs are resolved relative to the containing module's path.
 
 ## Known limitations
 
 - The search index parser only supports rustdoc formats up to Rust 1.56. Post-1.56 docs fall back to direct HTML lookup (no search index).
 - `text-style 0.3` is only used for its `termion` and `syntect` features — the `cursive` feature is intentionally excluded to avoid pulling in the yanked cursive 0.16.
-- External link opening in the TUI was removed when `cursive-markup` was dropped.
+- Inline link navigation (clicking links embedded mid-sentence in text) is not supported; links are extracted and shown as separate `→ name` items below each paragraph instead.

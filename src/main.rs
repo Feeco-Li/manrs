@@ -109,7 +109,7 @@ fn resolve_keyword(args: &args::Args) -> anyhow::Result<Option<doc::Name>> {
         "No documentation found after running cargo doc."
     );
 
-    pick_crate(&crates)
+    viewer::pick_crate(&crates)
 }
 
 /// Load all sources given as a command-line argument and, if enabled, the default sources.
@@ -215,36 +215,6 @@ fn ensure_docs() -> anyhow::Result<bool> {
         .status()?;
 
     Ok(status.success())
-}
-
-/// Show an interactive numbered list of crates and return the chosen one.
-fn pick_crate(crates: &[String]) -> anyhow::Result<Option<doc::Name>> {
-    use std::io::Write;
-    use std::str::FromStr;
-
-    anyhow::ensure!(
-        termion::is_tty(&io::stdin()),
-        "No keyword provided and stdin is not a TTY — please provide a keyword."
-    );
-
-    println!("Select a crate to browse:");
-    println!();
-    let width = crates.len().to_string().len();
-    for (i, name) in crates.iter().enumerate() {
-        println!("[ {:width$} ] {}", i, name, width = width);
-    }
-    println!();
-    print!("> ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    if let Ok(i) = usize::from_str(input.trim()) {
-        Ok(crates.get(i).map(|s| s.clone().into()))
-    } else {
-        Ok(None)
-    }
 }
 
 /// Use the search index to find the documentation for an item that partially matches the given

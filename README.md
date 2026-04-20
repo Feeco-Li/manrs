@@ -18,31 +18,18 @@ Partial names work too:
 $ manrs HashMap
 ```
 
-**No keyword? Get an interactive crate picker.** Run `manrs` with no arguments inside any Cargo project — it will run `cargo doc` if needed, then show you a numbered list of available crates:
+**No keyword? Get an interactive TUI crate picker.** Run `manrs` with no arguments inside any Cargo project — it will run `cargo doc` if needed, then open a full-screen picker where you can type to filter and press Enter to open:
 
 ```
 $ manrs
-Documentation not found. Running cargo doc...
-Select a crate to browse:
-
-[ 0 ] anyhow
-[ 1 ] manrs
-[ 2 ] scraper
-[ 3 ] serde
-
-> 1
 ```
 
-If there are multiple matches for a keyword, manrs prompts you to pick one:
+The picker shows all available crates. Type any substring to narrow the list, use ↑/↓ to navigate, and press Enter to open.
+
+If there are multiple matches for a keyword, manrs prompts you to pick one in the same way:
 
 ```
 $ manrs u8
-Found multiple matches for u8 – select one of:
-
-[ 0 ] core::u8: The 8-bit unsigned integer type.
-[ 1 ] std::u8: The 8-bit unsigned integer type.
-
-> 1
 ```
 
 To read docs from a non-default location use `-s`/`--source`:
@@ -62,12 +49,27 @@ $ manrs --help
 Select a viewer with `--viewer`:
 
 - `plain` — plain text output, no formatting. Default for non-interactive use (pipes, scripts).
-- `rich` — formatted output with ANSI colors and syntax highlighting. Default for interactive terminals.
-- `tui` — interactive terminal UI with keyboard navigation.
+- `rich` — formatted output with ANSI colors and syntax highlighting.
+- `tui` — interactive terminal UI with keyboard navigation. **Default on interactive terminals.**
 
 ```
-$ manrs --viewer tui std::vec::Vec
+$ manrs --viewer rich std::vec::Vec   # force rich text
+$ manrs --viewer plain std::vec::Vec  # force plain text
 ```
+
+### TUI key bindings
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Jump to next / previous link |
+| `J` / `K` | Scroll down / up one line |
+| `Ctrl-F` / `Ctrl-B` | Page down / up |
+| `PageDown` / `PageUp` | Page down / up |
+| `g` / `G` | Jump to top / bottom |
+| `Enter` | Follow focused link |
+| `o` | Open any item by name |
+| `Backspace` | Go back |
+| `q` | Quit |
 
 ## Installation
 

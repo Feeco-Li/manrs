@@ -28,13 +28,15 @@ impl LinkView {
 
 impl cursive::View for LinkView {
     fn draw(&self, printer: &cursive::Printer) {
-        let mut style = theme::Style::from(theme::Effect::Underline);
-        if self.is_focused && printer.focused {
-            style = style.combine(theme::PaletteColor::Highlight);
+        let style = if self.is_focused && printer.focused {
+            theme::Style::from(theme::PaletteColor::Highlight).combine(theme::Effect::Underline)
+        } else {
+            theme::Style::from(theme::ColorStyle::front(theme::Color::Dark(
+                theme::BaseColor::Cyan,
+            )))
+            .combine(theme::Effect::Underline)
         };
-        printer.with_style(style, |printer| {
-            printer.print_styled((0, 0), &self.text)
-        });
+        printer.with_style(style, |printer| printer.print_styled((0, 0), &self.text));
     }
 
     fn required_size(&mut self, _constraint: cursive::XY<usize>) -> cursive::XY<usize> {

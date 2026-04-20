@@ -4,11 +4,13 @@
 mod views;
 
 use std::convert;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
-use cursive::view::{Resizable as _, Scrollable as _};
+use cursive::view::{Nameable as _, Resizable as _, Scrollable as _};
 use cursive::views::{
-    Dialog, EditView, LinearLayout, OnEventView, PaddedView, Panel, SelectView, TextView,
+    Dialog, DummyView, EditView, LinearLayout, OnEventView, PaddedView, Panel, SelectView,
+    TextView,
 };
 use cursive::{event, theme, utils::markup};
 
@@ -158,17 +160,22 @@ impl<'s> utils::ManRenderer for TuiManRenderer<'s> {
         text: &str,
         link: Option<utils::DocLink>,
     ) -> Result<(), Self::Error> {
-        let text = markup::StyledString::styled(text, theme::Effect::Bold);
+        let color = match indent {
+            0 => theme::Color::Dark(theme::BaseColor::Cyan),
+            3 => theme::Color::Dark(theme::BaseColor::Green),
+            _ => theme::Color::TerminalDefault,
+        };
+        let style = theme::Style::from(theme::ColorStyle::front(color)).combine(theme::Effect::Bold);
+        let styled = markup::StyledString::styled(text, style);
         if let Some(link) = link {
-            let heading = LinkView::new(text, move |s| {
+            let heading = LinkView::new(styled, move |s| {
                 if let Err(err) = open_link(s, link.clone().into()) {
                     report_error(s, err);
                 }
             });
             self.layout.add_child(indent_view(indent, heading));
         } else {
-            let heading = TextView::new(text);
-            self.layout.add_child(indent_view(indent, heading));
+            self.layout.add_child(indent_view(indent, TextView::new(styled)));
         }
         Ok(())
     }
@@ -186,13 +193,41 @@ impl<'s> utils::ManRenderer for TuiManRenderer<'s> {
 
     fn print_text(&mut self, indent: u8, text: &doc::Text) -> Result<(), Self::Error> {
         let indent_usize = usize::from(indent);
-        // Render HTML to plain text using html2text
         let width = self.max_width.saturating_sub(indent_usize);
-        let plain = html2text::config::plain()
-            .string_from_read(text.html.as_bytes(), width)
-            .unwrap_or_else(|_| text.plain.clone());
-        let text_view = TextView::new(plain);
-        self.layout.add_child(indent_view(indent, text_view));
+        let decorator = utils::RichDecorator::new(|_| false);
+        let lines = html2text::config::with_decorator(decorator)
+            .lines_from_read(text.html.as_bytes(), width)
+            .unwrap_or_default();
+        for line in &lines {
+            use html2text::render::text_renderer::TaggedLineElement;
+            let mut styled = markup::StyledString::new();
+            for elem in line.iter() {
+                if let TaggedLineElement::Str(ts) = elem {
+                    let style = rich_annotations_to_style(&ts.tag);
+                    styled.append(markup::StyledString::styled(ts.s.as_str(), style));
+                }
+            }
+            self.layout.add_child(indent_view(indent, TextView::new(styled)));
+        }
+
+        // Add navigable link views for inline doc links
+        let base = module_path(&self.doc_name, self.doc_ty);
+        for (link_text, doc_link) in extract_doc_links(&text.html, &base) {
+            let display = markup::StyledString::styled(
+                format!("→ {}", link_text),
+                theme::Style::from(theme::ColorStyle::front(theme::Color::Dark(
+                    theme::BaseColor::Cyan,
+                )))
+                .combine(theme::Effect::Underline),
+            );
+            let lv = LinkView::new(display, move |s| {
+                if let Err(err) = open_link(s, doc_link.clone().into()) {
+                    report_error(s, err);
+                }
+            });
+            self.layout.add_child(indent_view(indent + 2, lv));
+        }
+
         Ok(())
     }
 
@@ -202,8 +237,225 @@ impl<'s> utils::ManRenderer for TuiManRenderer<'s> {
     }
 }
 
+fn rich_annotations_to_style(
+    tags: &[html2text::render::text_renderer::RichAnnotation],
+) -> theme::Style {
+    use html2text::render::text_renderer::RichAnnotation;
+    let mut style = theme::Style::default();
+    for tag in tags {
+        match tag {
+            RichAnnotation::Strong => {
+                style = style
+                    .combine(theme::Effect::Bold)
+                    .combine(theme::ColorStyle::front(theme::Color::Light(theme::BaseColor::White)));
+            }
+            RichAnnotation::Emphasis => {
+                style = style
+                    .combine(theme::Effect::Italic)
+                    .combine(theme::ColorStyle::front(theme::Color::Light(theme::BaseColor::Green)));
+            }
+            RichAnnotation::Code => {
+                style = style.combine(theme::ColorStyle::front(theme::Color::Light(
+                    theme::BaseColor::Yellow,
+                )));
+            }
+            RichAnnotation::Link(_) => {
+                style = style
+                    .combine(theme::Effect::Underline)
+                    .combine(theme::ColorStyle::front(theme::Color::Dark(theme::BaseColor::Cyan)));
+            }
+            _ => {}
+        }
+    }
+    style
+}
+
+/// Open an interactive TUI crate picker and return the selected crate as a doc::Name.
+pub fn pick_crate(crates: &[String]) -> anyhow::Result<Option<doc::Name>> {
+    anyhow::ensure!(
+        termion::is_tty(&std::io::stdout()),
+        "No keyword provided and stdout is not a TTY — please provide a keyword."
+    );
+
+    let chosen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let crates_for_filter = crates.to_vec();
+    let chosen_select = chosen.clone();
+    let chosen_edit = chosen.clone();
+
+    let mut select: SelectView<String> = SelectView::new();
+    for c in crates {
+        select.add_item(c.clone(), c.clone());
+    }
+    select.set_on_submit(move |s, item: &String| {
+        *chosen_select.lock().unwrap() = Some(item.clone());
+        s.quit();
+    });
+
+    let edit = EditView::new()
+        .on_edit(move |s, text, _| {
+            let text_lower = text.to_lowercase();
+            s.call_on_name("crates", |v: &mut SelectView<String>| {
+                v.clear();
+                for c in &crates_for_filter {
+                    if c.to_lowercase().contains(&text_lower) {
+                        v.add_item(c.clone(), c.clone());
+                    }
+                }
+            });
+        })
+        .on_submit(move |s, _| {
+            let first = s
+                .call_on_name("crates", |v: &mut SelectView<String>| {
+                    v.selection().map(|rc| rc.as_ref().clone())
+                })
+                .flatten();
+            if let Some(item) = first {
+                *chosen_edit.lock().unwrap() = Some(item);
+                s.quit();
+            }
+        });
+
+    let inner = LinearLayout::vertical()
+        .child(PaddedView::lrtb(
+            2, 2, 1, 1,
+            LinearLayout::horizontal()
+                .child(TextView::new(
+                    markup::StyledString::styled("Filter: ", theme::Effect::Bold),
+                ))
+                .child(edit.full_width()),
+        ))
+        .child(DummyView)
+        .child(PaddedView::lrtb(
+            1, 1, 0, 1,
+            select.with_name("crates").scrollable().full_screen(),
+        ));
+
+    let hint = markup::StyledString::styled(
+        "  ↑/↓ navigate  ·  j/k jump links  ·  Enter open  ·  q quit",
+        theme::ColorStyle::front(theme::Color::Dark(theme::BaseColor::Cyan)),
+    );
+
+    let mut siv = cursive::Cursive::new();
+    apply_theme(&mut siv);
+    siv.add_global_callback('q', |s| s.quit());
+    siv.add_fullscreen_layer(
+        LinearLayout::vertical()
+            .child(
+                Panel::new(inner)
+                    .title("manrs — select documentation")
+                    .full_screen(),
+            )
+            .child(TextView::new(hint)),
+    );
+    siv.try_run_with(create_backend)?;
+
+    let result = chosen.lock().unwrap().clone();
+    Ok(result.map(|s| s.into()))
+}
+
+fn apply_theme(siv: &mut cursive::Cursive) {
+    use theme::*;
+    let mut t = Theme { shadow: false, borders: BorderStyle::Simple, ..Default::default() };
+    t.palette[PaletteColor::Background] = Color::TerminalDefault;
+    t.palette[PaletteColor::View] = Color::TerminalDefault;
+    t.palette[PaletteColor::Primary] = Color::TerminalDefault;
+    t.palette[PaletteColor::Secondary] = Color::Dark(BaseColor::Cyan);
+    t.palette[PaletteColor::TitlePrimary] = Color::Dark(BaseColor::Cyan);
+    t.palette[PaletteColor::TitleSecondary] = Color::Dark(BaseColor::Green);
+    // Selection bar: dark blue bg, bright white text
+    t.palette[PaletteColor::Highlight] = Color::Dark(BaseColor::Blue);
+    t.palette[PaletteColor::HighlightInactive] = Color::Dark(BaseColor::Black);
+    t.palette[PaletteColor::HighlightText] = Color::Light(BaseColor::White);
+    siv.set_theme(t);
+}
+
 fn indent_view<V>(indent: impl Into<usize>, view: V) -> PaddedView<V> {
     PaddedView::lrtb(indent.into(), 0, 0, 0, view)
+}
+
+/// Returns the containing-module FQN string used as the base for URL resolution.
+fn module_path(doc_name: &doc::Fqn, doc_ty: doc::ItemType) -> String {
+    use doc::ItemType::*;
+    let s = doc_name.as_ref();
+    let parts: Vec<&str> = s.split("::").collect();
+    let trimmed = match doc_ty {
+        Module => parts.as_slice(),
+        Method | StructField | Variant | AssocType | AssocConst => {
+            let end = parts.len().saturating_sub(2);
+            &parts[..end]
+        }
+        _ => {
+            let end = parts.len().saturating_sub(1);
+            &parts[..end]
+        }
+    };
+    if trimmed.is_empty() { s.to_owned() } else { trimmed.join("::") }
+}
+
+/// Parse relative rustdoc URL into a DocLink, returning None for external / anchor-only links.
+fn parse_doc_url(base: &str, url: &str) -> Option<utils::DocLink> {
+    let url = url.split('#').next().unwrap_or(url);
+    let url = url.split('?').next().unwrap_or(url);
+    if url.is_empty() { return None; }
+
+    let segs: Vec<&str> = url.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() { return None; }
+
+    let mut path: Vec<String> = base
+        .split("::")
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
+    for seg in &segs[..segs.len() - 1] {
+        if *seg == ".." {
+            path.pop();
+        } else {
+            path.push(seg.to_string());
+        }
+    }
+
+    let filename = segs.last()?;
+    if *filename == "index.html" {
+        if path.is_empty() { return None; }
+        Some(utils::DocLink {
+            name: path.join("::").into(),
+            ty: Some(doc::ItemType::Module),
+        })
+    } else {
+        let stem = filename.strip_suffix(".html")?;
+        let dot = stem.find('.')?;
+        let ty_str = &stem[..dot];
+        let item_name = &stem[dot + 1..];
+        if item_name.contains('.') { return None; }
+        let ty: doc::ItemType = ty_str.parse().ok()?;
+        path.push(item_name.to_string());
+        Some(utils::DocLink {
+            name: path.join("::").into(),
+            ty: Some(ty),
+        })
+    }
+}
+
+/// Extract navigable doc links from an HTML fragment.
+fn extract_doc_links(html: &str, base: &str) -> Vec<(String, utils::DocLink)> {
+    use scraper::{Html, Selector};
+    let fragment = Html::parse_fragment(html);
+    let Ok(sel) = Selector::parse("a[href]") else { return Vec::new() };
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for elem in fragment.select(&sel) {
+        let Some(href) = elem.value().attr("href") else { continue };
+        if href.starts_with("http") || href.starts_with('#') { continue; }
+        let Some(link) = parse_doc_url(base, href) else { continue };
+        let text: String = elem.text().collect::<Vec<_>>().join(" ");
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() { continue; }
+        if seen.insert(href.to_owned()) {
+            result.push((text, link));
+        }
+    }
+    result
 }
 
 fn create_backend() -> anyhow::Result<Box<dyn cursive::backend::Backend>> {
@@ -220,11 +472,12 @@ fn create_cursive(
 
     cursive.set_user_data(Context::new(sources, args)?);
 
-    // vim-like keybindings
-    cursive.add_global_callback('j', |s| s.on_event(Key::Down.into()));
-    cursive.add_global_callback('k', |s| s.on_event(Key::Up.into()));
-    cursive.add_global_callback('h', |s| s.on_event(Key::Left.into()));
-    cursive.add_global_callback('l', |s| s.on_event(Key::Right.into()));
+    // j/k: jump to next/previous link (Tab traversal)
+    cursive.add_global_callback('j', |s| s.on_event(Event::Key(Key::Tab)));
+    cursive.add_global_callback('k', |s| s.on_event(Event::Shift(Key::Tab)));
+    // J/K: scroll line by line
+    cursive.add_global_callback('J', |s| s.on_event(Key::Down.into()));
+    cursive.add_global_callback('K', |s| s.on_event(Key::Up.into()));
     cursive.add_global_callback('G', |s| s.on_event(Key::End.into()));
     cursive.add_global_callback('g', |s| s.on_event(Key::Home.into()));
     cursive.add_global_callback(Event::CtrlChar('f'), |s| s.on_event(Key::PageDown.into()));
@@ -239,14 +492,7 @@ fn create_cursive(
     });
     cursive.add_global_callback('o', open_doc_dialog);
 
-    let mut theme = theme::Theme {
-        shadow: false,
-        ..Default::default()
-    };
-    theme.palette[theme::PaletteColor::Background] = theme::Color::TerminalDefault;
-    theme.palette[theme::PaletteColor::View] = theme::Color::TerminalDefault;
-    theme.palette[theme::PaletteColor::Primary] = theme::Color::TerminalDefault;
-    cursive.set_theme(theme);
+    apply_theme(&mut cursive);
 
     Ok(cursive)
 }

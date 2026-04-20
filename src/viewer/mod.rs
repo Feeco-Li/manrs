@@ -40,10 +40,13 @@ pub fn get_viewer(s: &str) -> anyhow::Result<Box<dyn Viewer>> {
 }
 
 pub fn get_default() -> Box<dyn Viewer> {
-    let text_mode = if termion::is_tty(&io::stdout()) {
-        text::TextMode::Rich
+    if termion::is_tty(&io::stdout()) {
+        Box::new(tui::TuiViewer::new())
     } else {
-        text::TextMode::Plain
-    };
-    Box::new(text::TextViewer::new(text_mode))
+        Box::new(text::TextViewer::new(text::TextMode::Plain))
+    }
+}
+
+pub fn pick_crate(crates: &[String]) -> anyhow::Result<Option<crate::doc::Name>> {
+    tui::pick_crate(crates)
 }
