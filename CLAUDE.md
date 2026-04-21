@@ -44,7 +44,7 @@ manrs is a CLI viewer for rustdoc-generated HTML documentation. The lookup pipel
    - `viewer/tui/` — interactive terminal UI using `cursive 0.21`. **Default on TTY.** Key internals:
      - `TuiManRenderer` renders sections as a `LinearLayout` of `TextView`/`LinkView`/`CodeView` children inside a `ScrollView`.
      - `LinkView` (in `views.rs`) is a focusable view that renders cyan underlined text and fires a callback on Enter. Focus is tracked via `is_focused`: set by `take_focus`, cleared by `Event::FocusLost`. The focused link renders with `PaletteColor::Highlight` (blue bg, white text) using `printer.print` on the plain text — bypassing the embedded `StyledString` colors that would otherwise override it.
-     - `j`/`k` simulate Tab/Shift-Tab for link-to-link focus traversal; `J`/`K` scroll line-by-line.
+     - `j`/`k` scroll one line down/up; `J`/`K` simulate Tab/Shift-Tab for link-to-link focus traversal.
      - `pick_crate()` is a separate full-screen cursive session (filter + select) that runs before the doc viewer session.
      - `extract_doc_links` + `parse_doc_url` parse `<a href>` tags in HTML text blocks and collect them in `TuiManRenderer::collected_links` (deduplicated via `seen_links`). They are inserted as a `LINKS` section at position 0 of the layout in `into_view`, not inline after each paragraph.
      - `print_text` uses `utils::highlight_html` to apply syntect syntax highlighting to `<pre>` code blocks in descriptions. Syntect output (`text_style::StyledStr`) is converted to cursive styles via `text_style_to_cursive` (manual conversion — the `text-style` cursive feature is excluded).
@@ -81,7 +81,7 @@ Key functions: `resolve_keyword`, `ensure_docs`, `get_workspace_doc_dir` in `mai
 ## TUI link navigation
 
 - Member headings in modules are rendered as `LinkView` (cyan, underlined, focusable).
-- `j`/`k` simulate Tab/Shift-Tab to jump between `LinkView` items; `ScrollView` auto-scrolls to follow focus.
+- `j`/`k` scroll the page one line down/up; `J`/`K` simulate Tab/Shift-Tab to jump between `LinkView` items.
 - The currently focused link is highlighted (blue background, white text) via `is_focused` state on `LinkView`. Focus gain/loss is tracked through `take_focus` / `Event::FocusLost`.
 - Doc links extracted from description HTML via `extract_doc_links` + `parse_doc_url` are collected across all `print_text` calls and rendered as a `LINKS` section at the **top** of the page (above Synopsis/Description), so they are immediately reachable by pressing `j`.
 

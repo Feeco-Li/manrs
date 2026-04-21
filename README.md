@@ -61,8 +61,8 @@ $ manrs --viewer plain std::vec::Vec  # force plain text
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Jump to next / previous link (highlighted in blue when focused) |
-| `J` / `K` | Scroll down / up one line |
+| `j` / `k` | Scroll down / up one line |
+| `J` / `K` | Jump to next / previous link (highlighted in blue when focused) |
 | `Ctrl-F` / `Ctrl-B` | Page down / up |
 | `PageDown` / `PageUp` | Page down / up |
 | `g` / `G` | Jump to top / bottom |

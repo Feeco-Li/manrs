@@ -397,7 +397,7 @@ pub fn pick_crate(crates: &[String]) -> anyhow::Result<Option<doc::Name>> {
         ));
 
     let hint = markup::StyledString::styled(
-        "  ↑/↓ navigate  ·  j/k jump links  ·  Enter open  ·  q quit",
+        "  ↑/↓ navigate  ·  j/k scroll  ·  J/K jump links  ·  Enter open  ·  q quit",
         theme::ColorStyle::front(theme::Color::Dark(theme::BaseColor::Cyan)),
     );
 
@@ -538,12 +538,12 @@ fn create_cursive(
 
     cursive.set_user_data(Context::new(sources, args)?);
 
-    // j/k: jump to next/previous link (Tab traversal)
-    cursive.add_global_callback('j', |s| s.on_event(Event::Key(Key::Tab)));
-    cursive.add_global_callback('k', |s| s.on_event(Event::Shift(Key::Tab)));
-    // J/K: scroll line by line
-    cursive.add_global_callback('J', |s| s.on_event(Key::Down.into()));
-    cursive.add_global_callback('K', |s| s.on_event(Key::Up.into()));
+    // j/k: scroll line by line
+    cursive.add_global_callback('j', |s| s.on_event(Key::Down.into()));
+    cursive.add_global_callback('k', |s| s.on_event(Key::Up.into()));
+    // J/K: jump to next/previous link (Tab traversal)
+    cursive.add_global_callback('J', |s| s.on_event(Event::Key(Key::Tab)));
+    cursive.add_global_callback('K', |s| s.on_event(Event::Shift(Key::Tab)));
     cursive.add_global_callback('G', |s| s.on_event(Key::End.into()));
     cursive.add_global_callback('g', |s| s.on_event(Key::Home.into()));
     cursive.add_global_callback(Event::CtrlChar('f'), |s| s.on_event(Key::PageDown.into()));
