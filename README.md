@@ -61,7 +61,7 @@ $ manrs --viewer plain std::vec::Vec  # force plain text
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Jump to next / previous link |
+| `j` / `k` | Jump to next / previous link (highlighted in blue when focused) |
 | `J` / `K` | Scroll down / up one line |
 | `Ctrl-F` / `Ctrl-B` | Page down / up |
 | `PageDown` / `PageUp` | Page down / up |
@@ -70,6 +70,19 @@ $ manrs --viewer plain std::vec::Vec  # force plain text
 | `o` | Open any item by name |
 | `Backspace` | Go back |
 | `q` | Quit |
+
+### TUI module page layout
+
+Each module or item page is structured as:
+
+1. **LINKS** — navigable doc links extracted from the description (e.g. `→ tower::Service`), shown at the top so the first `j` keypress reaches them immediately.
+2. **SYNOPSIS** — the item's type signature.
+3. **DESCRIPTION** — full documentation text with rich formatting:
+   - Linked identifiers (e.g. `axum`, `tower::Service`) rendered in **cyan + underline**.
+   - Inline code rendered in **light yellow**.
+   - Code blocks with full **syntax highlighting** (via syntect).
+   - Bold, italic, and emphasis text styled accordingly.
+4. **Member sections** — structs, functions, traits, etc., each heading a focusable link.
 
 ## Installation
 

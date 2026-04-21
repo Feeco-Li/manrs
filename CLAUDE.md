@@ -43,10 +43,12 @@ manrs is a CLI viewer for rustdoc-generated HTML documentation. The lookup pipel
    - `viewer/text/` — `plain` (no formatting) and `rich` (ANSI + syntax highlighting via syntect).
    - `viewer/tui/` — interactive terminal UI using `cursive 0.21`. **Default on TTY.** Key internals:
      - `TuiManRenderer` renders sections as a `LinearLayout` of `TextView`/`LinkView`/`CodeView` children inside a `ScrollView`.
-     - `LinkView` (in `views.rs`) is a focusable view that renders cyan underlined text and fires a callback on Enter.
+     - `LinkView` (in `views.rs`) is a focusable view that renders cyan underlined text and fires a callback on Enter. Focus is tracked via `is_focused`: set by `take_focus`, cleared by `Event::FocusLost`. The focused link renders with `PaletteColor::Highlight` (blue bg, white text) using `printer.print` on the plain text — bypassing the embedded `StyledString` colors that would otherwise override it.
      - `j`/`k` simulate Tab/Shift-Tab for link-to-link focus traversal; `J`/`K` scroll line-by-line.
      - `pick_crate()` is a separate full-screen cursive session (filter + select) that runs before the doc viewer session.
-     - `extract_doc_links` + `parse_doc_url` parse `<a href>` tags in HTML text blocks and render them as navigable `LinkView` items below each paragraph.
+     - `extract_doc_links` + `parse_doc_url` parse `<a href>` tags in HTML text blocks and collect them in `TuiManRenderer::collected_links` (deduplicated via `seen_links`). They are inserted as a `LINKS` section at position 0 of the layout in `into_view`, not inline after each paragraph.
+     - `print_text` uses `utils::highlight_html` to apply syntect syntax highlighting to `<pre>` code blocks in descriptions. Syntect output (`text_style::StyledStr`) is converted to cursive styles via `text_style_to_cursive` (manual conversion — the `text-style` cursive feature is excluded).
+     - `RichDecorator::annotating()` mode: preserves `Link` annotations on all inline links (enabling cyan+underline for linked items like `axum`, `tower::Service`) without adding `[N]` brackets or footnote lines.
 
 ## Dependencies (key ones)
 
@@ -80,10 +82,17 @@ Key functions: `resolve_keyword`, `ensure_docs`, `get_workspace_doc_dir` in `mai
 
 - Member headings in modules are rendered as `LinkView` (cyan, underlined, focusable).
 - `j`/`k` simulate Tab/Shift-Tab to jump between `LinkView` items; `ScrollView` auto-scrolls to follow focus.
-- `print_text` also calls `extract_doc_links` (scraper + `parse_doc_url`) to turn `<a href>` anchors in description HTML into `→ linkname` `LinkView` items rendered below each paragraph. URLs are resolved relative to the containing module's path.
+- The currently focused link is highlighted (blue background, white text) via `is_focused` state on `LinkView`. Focus gain/loss is tracked through `take_focus` / `Event::FocusLost`.
+- Doc links extracted from description HTML via `extract_doc_links` + `parse_doc_url` are collected across all `print_text` calls and rendered as a `LINKS` section at the **top** of the page (above Synopsis/Description), so they are immediately reachable by pressing `j`.
+
+## TUI description rendering
+
+- `print_text` uses `utils::highlight_html` (same path as the rich text viewer) so that `<pre>` code blocks within descriptions get full syntect syntax highlighting.
+- Inline links (`<a>` tags) retain their `Link` annotation via `RichDecorator::annotating()`, giving linked identifiers like `axum` or `tower::Service` cyan+underline styling distinct from plain inline code (light yellow).
+- `text_style_to_cursive` in `tui/mod.rs` manually converts `text_style::Style` → `theme::Style` since the `text-style` cursive feature is excluded.
 
 ## Known limitations
 
 - The search index parser only supports rustdoc formats up to Rust 1.56. Post-1.56 docs fall back to direct HTML lookup (no search index).
 - `text-style 0.3` is only used for its `termion` and `syntect` features — the `cursive` feature is intentionally excluded to avoid pulling in the yanked cursive 0.16.
-- Inline link navigation (clicking links embedded mid-sentence in text) is not supported; links are extracted and shown as separate `→ name` items below each paragraph instead.
+- Inline link navigation (clicking links embedded mid-sentence in text) is not supported; links are extracted and shown as a `LINKS` section at the top of the page instead.

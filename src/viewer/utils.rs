@@ -310,6 +310,7 @@ fn print_heading<M: ManRenderer + ?Sized>(
 pub struct RichDecorator {
     link_filter: fn(&str) -> bool,
     ignore_next_link: bool,
+    annotate_only: bool,
 }
 
 impl RichDecorator {
@@ -317,6 +318,16 @@ impl RichDecorator {
         RichDecorator {
             link_filter,
             ignore_next_link: false,
+            annotate_only: false,
+        }
+    }
+
+    /// Annotate all links with Link style (enables cyan+underline), no brackets, no footnotes.
+    pub fn annotating() -> RichDecorator {
+        RichDecorator {
+            link_filter: |_| true,
+            ignore_next_link: false,
+            annotate_only: true,
         }
     }
 }
@@ -325,6 +336,9 @@ impl text_renderer::TextDecorator for RichDecorator {
     type Annotation = text_renderer::RichAnnotation;
 
     fn decorate_link_start(&mut self, url: &str) -> (String, Self::Annotation) {
+        if self.annotate_only {
+            return (String::new(), text_renderer::RichAnnotation::Link(url.to_owned()));
+        }
         self.ignore_next_link = !(self.link_filter)(url);
         if self.ignore_next_link {
             (String::new(), text_renderer::RichAnnotation::Default)
@@ -335,7 +349,7 @@ impl text_renderer::TextDecorator for RichDecorator {
     }
 
     fn decorate_link_end(&mut self) -> String {
-        if self.ignore_next_link {
+        if self.annotate_only || self.ignore_next_link {
             String::new()
         } else {
             "]".to_owned()
@@ -406,6 +420,9 @@ impl text_renderer::TextDecorator for RichDecorator {
     }
 
     fn finalise(&mut self, links: Vec<String>) -> Vec<text_renderer::TaggedLine<Self::Annotation>> {
+        if self.annotate_only {
+            return Vec::new();
+        }
         links.into_iter().enumerate().map(|(idx, link)| {
             let mut line = text_renderer::TaggedLine::new();
             line.push_str(text_renderer::TaggedString {
@@ -421,7 +438,11 @@ impl text_renderer::TextDecorator for RichDecorator {
     }
 
     fn make_subblock_decorator(&self) -> Self {
-        RichDecorator::new(self.link_filter)
+        if self.annotate_only {
+            RichDecorator::annotating()
+        } else {
+            RichDecorator::new(self.link_filter)
+        }
     }
 }
 

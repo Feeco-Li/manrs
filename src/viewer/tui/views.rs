@@ -28,15 +28,18 @@ impl LinkView {
 
 impl cursive::View for LinkView {
     fn draw(&self, printer: &cursive::Printer) {
-        let style = if self.is_focused && printer.focused {
-            theme::Style::from(theme::PaletteColor::Highlight).combine(theme::Effect::Underline)
+        if self.is_focused && printer.focused {
+            let style = theme::Style::from(theme::ColorStyle::new(
+                theme::PaletteColor::HighlightText,
+                theme::PaletteColor::Highlight,
+            ))
+            .combine(theme::Effect::Underline);
+            printer.with_style(style, |printer| {
+                printer.print((0, 0), self.text.source());
+            });
         } else {
-            theme::Style::from(theme::ColorStyle::front(theme::Color::Dark(
-                theme::BaseColor::Cyan,
-            )))
-            .combine(theme::Effect::Underline)
-        };
-        printer.with_style(style, |printer| printer.print_styled((0, 0), &self.text));
+            printer.print_styled((0, 0), &self.text);
+        }
     }
 
     fn required_size(&mut self, _constraint: cursive::XY<usize>) -> cursive::XY<usize> {
@@ -52,10 +55,15 @@ impl cursive::View for LinkView {
     }
 
     fn on_event(&mut self, event: event::Event) -> event::EventResult {
-        if event == event::Event::Key(event::Key::Enter) {
-            event::EventResult::Consumed(Some(self.cb.clone()))
-        } else {
-            event::EventResult::Ignored
+        match event {
+            event::Event::Key(event::Key::Enter) => {
+                event::EventResult::Consumed(Some(self.cb.clone()))
+            }
+            event::Event::FocusLost => {
+                self.is_focused = false;
+                event::EventResult::Consumed(None)
+            }
+            _ => event::EventResult::Ignored,
         }
     }
 }

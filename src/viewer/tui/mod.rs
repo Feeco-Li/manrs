@@ -104,6 +104,8 @@ pub struct TuiManRenderer<'s> {
     layout: LinearLayout,
     max_width: usize,
     highlighter: Option<&'s utils::Highlighter>,
+    collected_links: Vec<(String, utils::DocLink)>,
+    seen_links: std::collections::HashSet<String>,
 }
 
 impl<'s> TuiManRenderer<'s> {
@@ -118,12 +120,44 @@ impl<'s> TuiManRenderer<'s> {
             layout: LinearLayout::vertical(),
             max_width,
             highlighter,
+            collected_links: Vec::new(),
+            seen_links: std::collections::HashSet::new(),
         }
     }
 
-    fn into_view(self) -> impl cursive::View {
+    fn into_view(mut self) -> impl cursive::View {
         use cursive::view::scroll::Scroller as _;
         use cursive::With as _;
+
+        if !self.collected_links.is_empty() {
+            // Insert blank line separator before the main content
+            self.layout.insert_child(0, TextView::new(" "));
+            // Insert link views in reverse order so they end up in original order at pos 0
+            for (link_text, doc_link) in self.collected_links.into_iter().rev() {
+                let display = markup::StyledString::styled(
+                    format!("→ {}", link_text),
+                    theme::Style::from(theme::ColorStyle::front(theme::Color::Dark(
+                        theme::BaseColor::Cyan,
+                    )))
+                    .combine(theme::Effect::Underline),
+                );
+                let lv = LinkView::new(display, move |s| {
+                    if let Err(err) = open_link(s, doc_link.clone().into()) {
+                        report_error(s, err);
+                    }
+                });
+                self.layout.insert_child(0, indent_view(2u8, lv));
+            }
+            // Insert "LINKS" section heading at the very top
+            let heading_style = theme::Style::from(theme::ColorStyle::front(
+                theme::Color::Dark(theme::BaseColor::Cyan),
+            ))
+            .combine(theme::Effect::Bold);
+            self.layout.insert_child(
+                0,
+                TextView::new(markup::StyledString::styled("LINKS", heading_style)),
+            );
+        }
 
         let title = format!("{} {}", self.doc_ty.name(), self.doc_name);
         let scroll = self.layout.scrollable();
@@ -194,38 +228,34 @@ impl<'s> utils::ManRenderer for TuiManRenderer<'s> {
     fn print_text(&mut self, indent: u8, text: &doc::Text) -> Result<(), Self::Error> {
         let indent_usize = usize::from(indent);
         let width = self.max_width.saturating_sub(indent_usize);
-        let decorator = utils::RichDecorator::new(|_| false);
+        let decorator = utils::RichDecorator::annotating();
         let lines = html2text::config::with_decorator(decorator)
             .lines_from_read(text.html.as_bytes(), width)
             .unwrap_or_default();
-        for line in &lines {
-            use html2text::render::text_renderer::TaggedLineElement;
+        for elements in utils::highlight_html(&lines, self.highlighter) {
             let mut styled = markup::StyledString::new();
-            for elem in line.iter() {
-                if let TaggedLineElement::Str(ts) = elem {
-                    let style = rich_annotations_to_style(&ts.tag);
-                    styled.append(markup::StyledString::styled(ts.s.as_str(), style));
+            for elem in elements {
+                match elem {
+                    utils::HighlightedHtmlElement::RichString(ts) => {
+                        let style = rich_annotations_to_style(&ts.tag);
+                        styled.append(markup::StyledString::styled(ts.s.as_str(), style));
+                    }
+                    utils::HighlightedHtmlElement::StyledString(ss) => {
+                        let style = text_style_to_cursive(ss.style);
+                        styled.append(markup::StyledString::styled(ss.s.to_owned(), style));
+                    }
                 }
             }
             self.layout.add_child(indent_view(indent, TextView::new(styled)));
         }
 
-        // Add navigable link views for inline doc links
+        // Collect navigable doc links for the top-of-page links section
         let base = module_path(&self.doc_name, self.doc_ty);
         for (link_text, doc_link) in extract_doc_links(&text.html, &base) {
-            let display = markup::StyledString::styled(
-                format!("→ {}", link_text),
-                theme::Style::from(theme::ColorStyle::front(theme::Color::Dark(
-                    theme::BaseColor::Cyan,
-                )))
-                .combine(theme::Effect::Underline),
-            );
-            let lv = LinkView::new(display, move |s| {
-                if let Err(err) = open_link(s, doc_link.clone().into()) {
-                    report_error(s, err);
-                }
-            });
-            self.layout.add_child(indent_view(indent + 2, lv));
+            let key = doc_link.name.as_ref().to_owned();
+            if self.seen_links.insert(key) {
+                self.collected_links.push((link_text, doc_link));
+            }
         }
 
         Ok(())
@@ -268,6 +298,42 @@ fn rich_annotations_to_style(
         }
     }
     style
+}
+
+fn text_style_to_cursive(style: Option<text_style::Style>) -> theme::Style {
+    use text_style::{AnsiColor, AnsiMode, Color};
+    let Some(style) = style else {
+        return theme::Style::default();
+    };
+    let mut out = theme::Style::default();
+    if let Some(fg) = style.fg {
+        let color = match fg {
+            Color::Ansi { color, mode } => {
+                let base = match color {
+                    AnsiColor::Black => theme::BaseColor::Black,
+                    AnsiColor::Red => theme::BaseColor::Red,
+                    AnsiColor::Green => theme::BaseColor::Green,
+                    AnsiColor::Yellow => theme::BaseColor::Yellow,
+                    AnsiColor::Blue => theme::BaseColor::Blue,
+                    AnsiColor::Magenta => theme::BaseColor::Magenta,
+                    AnsiColor::Cyan => theme::BaseColor::Cyan,
+                    AnsiColor::White => theme::BaseColor::White,
+                };
+                match mode {
+                    AnsiMode::Dark => theme::Color::Dark(base),
+                    AnsiMode::Light => theme::Color::Light(base),
+                }
+            }
+            Color::Rgb { r, g, b } => theme::Color::Rgb(r, g, b),
+        };
+        out = out.combine(theme::ColorStyle::front(color));
+    }
+    let e = style.effects;
+    if e.is_bold { out = out.combine(theme::Effect::Bold); }
+    if e.is_italic { out = out.combine(theme::Effect::Italic); }
+    if e.is_underline { out = out.combine(theme::Effect::Underline); }
+    if e.is_strikethrough { out = out.combine(theme::Effect::Strikethrough); }
+    out
 }
 
 /// Open an interactive TUI crate picker and return the selected crate as a doc::Name.
