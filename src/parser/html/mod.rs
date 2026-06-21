@@ -44,11 +44,38 @@ impl Parser {
     }
 
     pub fn find_item(&self, item: &str) -> anyhow::Result<Option<String>> {
-        let item = select(&self.document, "ul.docblock li a")?
+        self.find_item_inner(item, |text| text == item)
+    }
+
+    /// Find all items matching a local name, returning (link_text, href) pairs.
+    /// link_text is the path within the crate (e.g. "string::String").
+    pub fn find_all_by_local_name(&self, item: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let suffix = format!("::{}", item);
+        let results = select(&self.document, "ul.docblock li a, ul.all-items li a")?
             .into_iter()
-            .find(|e| e.text_contents() == item)
+            .filter(|e| {
+                let text = e.text_contents();
+                text == item || text.ends_with(&suffix)
+            })
+            .filter_map(|e| {
+                e.get_attribute("href")
+                    .map(|href| (e.text_contents(), href.to_string()))
+            })
+            .collect();
+        Ok(results)
+    }
+
+    fn find_item_inner<F>(&self, _item: &str, match_fn: F) -> anyhow::Result<Option<String>>
+    where
+        F: Fn(&str) -> bool,
+    {
+        // Old rustdoc format: <ul class="docblock"><li><a>LocalName</a></li>
+        // New rustdoc format (1.57+): <ul class="all-items"><li><a>path::LocalName</a></li>
+        let result = select(&self.document, "ul.docblock li a, ul.all-items li a")?
+            .into_iter()
+            .find(|e| match_fn(&e.text_contents()))
             .and_then(|e| e.get_attribute("href"));
-        Ok(item)
+        Ok(result)
     }
 
     pub fn find_member(&self, name: &doc::Fqn) -> anyhow::Result<Option<doc::ItemType>> {
@@ -128,7 +155,9 @@ impl Parser {
 
         let mut doc = doc::Doc::new(name.clone(), ty);
         doc.definition = Some(element_ref_to_code(&code));
-        doc.description = docblock.and_then(|n| ElementRef::wrap(n)).map(|e| element_ref_to_text(&e));
+        doc.description = docblock
+            .and_then(|n| ElementRef::wrap(n))
+            .map(|e| element_ref_to_text(&e));
         Ok(doc)
     }
 
@@ -150,10 +179,7 @@ impl Parser {
 
     pub fn find_examples(&self) -> anyhow::Result<Vec<doc::Example>> {
         let examples = select(&self.document, ".rust-example-rendered")?;
-        Ok(examples
-            .into_iter()
-            .map(|e| get_example(&e))
-            .collect())
+        Ok(examples.into_iter().map(|e| get_example(&e)).collect())
     }
 }
 
@@ -216,19 +242,13 @@ fn push_node_to_text(s: &mut String, node: NodeRef<'_, Node>) {
     }
 }
 
-fn select<'a>(
-    document: &'a Html,
-    selector: &str,
-) -> anyhow::Result<Vec<ElementRef<'a>>> {
+fn select<'a>(document: &'a Html, selector: &str) -> anyhow::Result<Vec<ElementRef<'a>>> {
     let sel = Selector::parse(selector)
         .map_err(|e| anyhow::anyhow!("Could not parse selector {}: {:?}", selector, e))?;
     Ok(document.select(&sel).collect())
 }
 
-fn select_first<'a>(
-    document: &'a Html,
-    selector: &str,
-) -> anyhow::Result<Option<ElementRef<'a>>> {
+fn select_first<'a>(document: &'a Html, selector: &str) -> anyhow::Result<Option<ElementRef<'a>>> {
     let sel = Selector::parse(selector)
         .map_err(|e| anyhow::anyhow!("Could not parse selector {}: {:?}", selector, e))?;
     Ok(document.select(&sel).next())
@@ -326,9 +346,8 @@ fn get_fields(
     let heading = select_first(document, &format!("#{}", get_item_group_id(ty)))?;
 
     // NodeRef is Copy so we can use by value in loops
-    let mut next: Option<NodeRef<'_, Node>> = heading
-        .as_ref()
-        .and_then(|e| (*e).next_sibling_element());
+    let mut next: Option<NodeRef<'_, Node>> =
+        heading.as_ref().and_then(|e| (*e).next_sibling_element());
     let mut name: Option<String> = None;
     let mut definition: Option<doc::Code> = None;
 
@@ -474,23 +493,13 @@ fn get_assoc_types(
     if let Some(heading) = heading {
         if let Some(methods) = (*heading).next_sibling_element() {
             // Rust < 1.54.0
-            let group = if let Some(group) = get_method_group(
-                parent,
-                None,
-                &methods,
-                doc::ItemType::AssocType,
-                "h3",
-            )? {
+            let group = if let Some(group) =
+                get_method_group(parent, None, &methods, doc::ItemType::AssocType, "h3")?
+            {
                 Some(group)
             } else {
                 // Rust >= 1.54.0
-                get_method_group(
-                    parent,
-                    None,
-                    &methods,
-                    doc::ItemType::AssocType,
-                    "h4",
-                )?
+                get_method_group(parent, None, &methods, doc::ItemType::AssocType, "h4")?
             };
             if let Some(group) = group {
                 groups.push(group);
@@ -510,9 +519,8 @@ fn get_method_groups(
 ) -> anyhow::Result<Vec<doc::MemberGroup>> {
     let mut groups: Vec<doc::MemberGroup> = Vec::new();
     let heading = select_first(document, &format!("#{}", heading_id))?;
-    let mut next: Option<NodeRef<'_, Node>> = heading
-        .as_ref()
-        .and_then(|e| (*e).next_sibling_element());
+    let mut next: Option<NodeRef<'_, Node>> =
+        heading.as_ref().and_then(|e| (*e).next_sibling_element());
 
     while let Some(subheading) = next.take() {
         if let Some(e) = ElementRef::wrap(subheading) {
@@ -624,9 +632,8 @@ fn get_variants(
     let mut variants = MemberDocs::new(parent, ty);
     let heading = select_first(document, &format!("#{}", get_item_group_id(ty)))?;
 
-    let mut next: Option<NodeRef<'_, Node>> = heading
-        .as_ref()
-        .and_then(|e| (*e).next_sibling_element());
+    let mut next: Option<NodeRef<'_, Node>> =
+        heading.as_ref().and_then(|e| (*e).next_sibling_element());
     let mut name: Option<String> = None;
     let mut definition: Option<doc::Code> = None;
     while let Some(element) = &next {
@@ -693,30 +700,25 @@ fn get_implementation_group(
     if let Some(list_div) = list_div {
         // list_div derefs to NodeRef
         for item in (*list_div).children() {
-            let h3: Option<NodeRef<'_, Node>> =
-                if item.is_element_name("details") {
-                    let summary = item.children().find(|n| n.value().is_element());
-                    if let Some(summary) = summary {
-                        select_first_in_node(&summary, "h3.impl, h3.code-header")?
-                            .map(|e| *e)
-                    } else {
-                        None
-                    }
-                } else if item.is_element_name("h3") && item.has_class("impl") {
-                    Some(item)
-                } else if item.is_element_name("div") && item.has_class("impl") {
-                    select_first_in_node(&item, "h3")?
-                        .map(|e| *e)
+            let h3: Option<NodeRef<'_, Node>> = if item.is_element_name("details") {
+                let summary = item.children().find(|n| n.value().is_element());
+                if let Some(summary) = summary {
+                    select_first_in_node(&summary, "h3.impl, h3.code-header")?.map(|e| *e)
                 } else {
                     None
-                };
+                }
+            } else if item.is_element_name("h3") && item.has_class("impl") {
+                Some(item)
+            } else if item.is_element_name("div") && item.has_class("impl") {
+                select_first_in_node(&item, "h3")?.map(|e| *e)
+            } else {
+                None
+            };
 
             if let Some(h3) = h3 {
                 let a = select_first_in_node(&h3, "a")?;
                 let mut name = a.map(|n| n.text_contents());
-                let first_child_code = h3
-                    .children()
-                    .find(|n| n.is_element_name("code"));
+                let first_child_code = h3.children().find(|n| n.is_element_name("code"));
                 let mut definition = Some(
                     first_child_code
                         .map(|n| {

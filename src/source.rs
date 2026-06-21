@@ -21,6 +21,10 @@ pub trait Source {
     ) -> anyhow::Result<Option<doc::Doc>>;
     fn load_index(&self) -> anyhow::Result<Option<index::Index>>;
     fn list_crates(&self) -> Vec<String>;
+    /// Find items by local name (last component) from all.html. Returns None if not supported.
+    fn find_by_local_name(&self, _name: &str) -> anyhow::Result<Option<Vec<index::IndexItem>>> {
+        Ok(None)
+    }
 }
 
 /// A collection of sources.
@@ -77,6 +81,21 @@ impl Sources {
             .map(|i| i.find(name))
             .collect::<Vec<_>>()
             .concat();
+        items.sort_unstable();
+        items.dedup();
+        Ok(items)
+    }
+
+    /// Search for an item by its local name (last component) across all sources' all.html files.
+    /// This is a fallback when the search index is not available (Rust 1.57+ removed it).
+    pub fn search_by_local_name(&self, name: &doc::Name) -> anyhow::Result<Vec<index::IndexItem>> {
+        let local_name = name.last();
+        let mut items: Vec<index::IndexItem> = Vec::new();
+        for source in &self.0 {
+            if let Some(source_items) = source.find_by_local_name(local_name)? {
+                items.extend(source_items);
+            }
+        }
         items.sort_unstable();
         items.dedup();
         Ok(items)
@@ -270,6 +289,78 @@ impl Source for DirSource {
             .collect();
         crates.sort();
         crates
+    }
+
+    fn find_by_local_name(&self, name: &str) -> anyhow::Result<Option<Vec<index::IndexItem>>> {
+        self.find_by_local_name_inner(name)
+    }
+}
+
+impl DirSource {
+    fn find_by_local_name_inner(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Option<Vec<index::IndexItem>>> {
+        log::info!(
+            "Searching all.html for local name '{}' in '{}'",
+            name,
+            self.path.display()
+        );
+        let mut items: Vec<index::IndexItem> = Vec::new();
+
+        // Check if this directory itself has all.html (single-crate doc)
+        let all_path = self.path.join("all.html");
+        if all_path.is_file() {
+            let crate_name = self.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            items.extend(Self::search_all_html(&all_path, crate_name, name)?);
+        }
+
+        // Also search subdirectories (multi-crate doc like std library)
+        if let Ok(entries) = fs::read_dir(&self.path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    let sub_all = entry.path().join("all.html");
+                    if sub_all.is_file() {
+                        if let Some(crate_name) = entry.file_name().to_str() {
+                            items.extend(Self::search_all_html(&sub_all, crate_name, name)?);
+                        }
+                    }
+                }
+            }
+        }
+
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(items))
+        }
+    }
+
+    fn search_all_html(
+        all_path: &path::Path,
+        crate_name: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<index::IndexItem>> {
+        let parser = html::Parser::from_file(all_path)?;
+        let matches = parser.find_all_by_local_name(name)?;
+        Ok(matches
+            .into_iter()
+            .filter_map(|(link_text, href)| {
+                // Extract type from filename (e.g. "struct.String.html" -> "struct")
+                let file_name = path::Path::new(&href)
+                    .file_name()
+                    .and_then(|n| n.to_str())?;
+                let ty_str = file_name.splitn(2, '.').next()?;
+                let ty = ty_str.parse::<doc::ItemType>().ok()?;
+                // Build FQN: crate_name::link_text
+                let fqn_str = format!("{}::{}", crate_name, link_text);
+                Some(index::IndexItem {
+                    name: fqn_str.into(),
+                    ty,
+                    description: String::new(),
+                })
+            })
+            .collect())
     }
 }
 
