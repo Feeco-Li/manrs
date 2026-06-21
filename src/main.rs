@@ -95,9 +95,7 @@ fn resolve_keyword(args: &args::Args) -> anyhow::Result<Option<doc::Name>> {
 
     if crates.is_empty() {
         if !ensure_docs()? {
-            anyhow::bail!(
-                "No documentation found. Run 'cargo doc' first, or provide a keyword."
-            );
+            anyhow::bail!("No documentation found. Run 'cargo doc' first, or provide a keyword.");
         }
         // Reload after generating docs
         let sources = load_sources(&args.source_paths, !args.no_default_sources)?;
@@ -194,7 +192,11 @@ fn get_workspace_doc_dir() -> Option<path::PathBuf> {
     }
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let workspace_root = json["workspace_root"].as_str()?;
-    Some(path::PathBuf::from(workspace_root).join("target").join("doc"))
+    Some(
+        path::PathBuf::from(workspace_root)
+            .join("target")
+            .join("doc"),
+    )
 }
 
 /// Run `cargo doc` if we are inside a Cargo project. Returns true on success.
@@ -210,9 +212,7 @@ fn ensure_docs() -> anyhow::Result<bool> {
     }
 
     eprintln!("Documentation not found. Running cargo doc...");
-    let status = std::process::Command::new("cargo")
-        .arg("doc")
-        .status()?;
+    let status = std::process::Command::new("cargo").arg("doc").status()?;
 
     Ok(status.success())
 }
@@ -243,10 +243,26 @@ fn search_item(
 ) -> anyhow::Result<Option<index::IndexItem>> {
     let items = sources.search(name)?;
     if items.is_empty() {
-        Err(anyhow::anyhow!(
-            "Could not find documentation for {}",
-            &name
-        ))
+        // Fallback: search all.html by local name when search index is unavailable (Rust 1.57+)
+        log::info!(
+            "Search index returned no results, trying all.html fallback for '{}'",
+            name
+        );
+        let items = sources.search_by_local_name(name)?;
+        if items.is_empty() {
+            Err(anyhow::anyhow!(
+                "Could not find documentation for {}",
+                &name
+            ))
+        } else if items.len() == 1 {
+            log::info!(
+                "Search fallback returned a single item: '{}'",
+                &items[0].name
+            );
+            Ok(Some(items[0].clone()))
+        } else {
+            select_item(&items, name)
+        }
     } else if items.len() == 1 {
         log::info!("Search returned a single item: '{}'", &items[0].name);
         Ok(Some(items[0].clone()))
